@@ -17,7 +17,7 @@ if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
 e.script_key=k
-local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d)}})
+local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
 local f=loadstring(r.Body or r.body or "")
 if not f then stop() return end
@@ -40,7 +40,7 @@ end
 if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
-local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d)}})
+local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
 local f=loadstring(r.Body or r.body or "")
 if not f then stop() return end

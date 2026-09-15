@@ -1284,7 +1284,13 @@ end`;
 
 async function handlePublicLoader(request, env, loaderId, ctx) {
   const credentials = sourceCredentials(request);
-  if (!credentials.key || !credentials.deviceId) return deniedSource();
+  if (!credentials.key || !credentials.deviceId) {
+    const cleanUrl = `${new URL(request.url).origin}/files/v4/loaders/${loaderId}.lua`;
+    return new Response(authenticatedLauncher(cleanUrl), {
+      status: 200,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
+    });
+  }
   const license = await findLicenseByKey(env, credentials.key);
   if (!license) return deniedSource();
 
@@ -1316,13 +1322,11 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
   const valid = await validateLicense(env, license, credentials.deviceId, true);
   if (!valid.ok) return deniedSource();
   if (!hasLoaderExecutionIntent(request)) {
-    const hash = await hashDevice(env, credentials.deviceId);
-    const timestamp = now();
-    await env.DB.batch([
-      env.DB.prepare("INSERT OR IGNORE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'loader_probe', ?, ?)").bind(guild.guild_id, hash, license.id, timestamp),
-      env.DB.prepare("UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)").bind(timestamp, guild.guild_id, hash, license.id),
-    ]);
-    return deniedSource();
+    const cleanUrl = `${new URL(request.url).origin}/files/v4/loaders/${loaderId}.lua`;
+    return new Response(authenticatedLauncher(cleanUrl), {
+      status: 200,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
+    });
   }
   return new Response(buildBootstrapSource(new URL(request.url).origin, script.id), {
     status: 200,
@@ -1332,7 +1336,11 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
 
 async function handleFfaPublicLoader(request, env, loaderId) {
   const { deviceId } = sourceCredentials(request);
-  if (!deviceId) return deniedSource();
+  const cleanUrl = `${new URL(request.url).origin}/files/v4/ffa/${loaderId}.lua`;
+  if (!deviceId) return new Response(ffaLauncher(cleanUrl), {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
+  });
   const script = await env.DB.prepare("SELECT * FROM scripts WHERE loader_id = ? LIMIT 1")
     .bind(loaderId)
     .first();
@@ -1344,7 +1352,10 @@ async function handleFfaPublicLoader(request, env, loaderId) {
   // FFA requests have no account secret. Require the execution-only launcher
   // marker, but do not trust a caller-supplied raw HWID enough to blacklist it
   // until the signed in-runtime report proof is available.
-  if (!hasLoaderExecutionIntent(request)) return deniedSource();
+  if (!hasLoaderExecutionIntent(request)) return new Response(ffaLauncher(cleanUrl), {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
+  });
   const reportToken = await createFfaReportToken(env, guild.guild_id, script.id, deviceHash);
   return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true, reportToken), {
     status: 200,

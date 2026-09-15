@@ -1686,8 +1686,9 @@ for _,env in ipairs(__ea_envs()) do
     end)
 end
 
--- Layer 8: environment/introspection logger guard. These APIs expose closures,
--- bytecode, constants, stack data, or the live execution environment.
+-- Layer 8: high-confidence source-extraction guard. Do not block ordinary
+-- getgenv/getfenv/gethui/debug/hook APIs: protected hubs commonly use those
+-- during startup and treating them as hostile causes immediate false bans.
 local __ea_logger_envs=__ea_envs()
 local __ea_hook_fn=hookfunction
 local function __ea_install_environment_guard(env,name)
@@ -1699,13 +1700,8 @@ local function __ea_install_environment_guard(env,name)
     pcall(function() if __ea_hook_fn then __ea_hook_fn(old,wrap) end end)
 end
 for _,env in ipairs(__ea_logger_envs) do
-    for _,name in ipairs({"getgenv","getrenv","getsenv","getfenv","getgc","getloadedmodules","getscriptclosure","getscriptbytecode","dumpstring","decompile","getrawmetatable","setreadonly","make_writeable","make_readonly","hookfunction","hookmetamethod","gethui","getinstances","getnilinstances"}) do
+    for _,name in ipairs({"getscriptclosure","getscriptbytecode","dumpstring","decompile"}) do
         pcall(__ea_install_environment_guard,env,name)
-    end
-    if type(env.debug)=="table" then
-        for _,name in ipairs({"getupvalue","getupvalues","getconstant","getconstants","getproto","getprotos","getstack","getinfo"}) do
-            pcall(__ea_install_environment_guard,env.debug,name)
-        end
     end
 end
 

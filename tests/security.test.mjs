@@ -86,6 +86,9 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
   assert.match(clipboardLayer,/copyclipboard/);
   assert.match(clipboardLayer,/clipboardset/);
   assert.match(clipboardLayer,/setclip/);
+  assert.match(clipboardLayer,/return env\[name\]/);
+  assert.match(clipboardLayer,/"clipboard","Clipboard","syn"/);
+  assert.match(lua,/getfenv\(0\)/);
 });
 
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {

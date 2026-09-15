@@ -41,15 +41,5 @@
   },
   "vars": {
     "HWID_RESET_COOLDOWN_MINUTES": "5"
-  },
-  "secrets": {
-    "required": [
-      "DISCORD_PUBLIC_KEY",
-      "DISCORD_BOT_TOKEN",
-      "DISCORD_APPLICATION_ID",
-      "LICENSE_KEY_SECRET",
-      "HWID_PEPPER",
-      "CONFIG_SECRET"
-    ]
   }
 }

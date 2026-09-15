@@ -73,6 +73,16 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
   const extractionLayer=lua.slice(lua.indexOf('-- Layer 8:'),lua.indexOf('-- Layer 9:'));
   assert.match(extractionLayer,/decompile|getscriptbytecode/);
   assert.doesNotMatch(extractionLayer,/"getgenv"|"getfenv"|"gethui"|"hookfunction"|"hookmetamethod"/);
+  const guiLayer=lua.slice(lua.indexOf('-- Layer 5:'),lua.indexOf('-- Layer 6:'));
+  assert.match(guiLayer,/TextBox/);
+  assert.match(guiLayer,/TextLabel/);
+  assert.match(guiLayer,/TextButton/);
+  assert.match(guiLayer,/GetPropertyChangedSignal\("Text"\)/);
+  assert.match(guiLayer,/__ea_gui_fragments/);
+  const clipboardLayer=lua.slice(lua.indexOf('-- Layer 3:'),lua.indexOf('-- Layer 4:'));
+  assert.match(clipboardLayer,/copyclipboard/);
+  assert.match(clipboardLayer,/clipboardset/);
+  assert.match(clipboardLayer,/setclip/);
 });
 
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {

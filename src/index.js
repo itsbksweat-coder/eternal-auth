@@ -476,6 +476,10 @@ export default {
         return handleSecurityReport(request, env);
       }
 
+      if (url.pathname === "/api/v1/ffa/security/report" && request.method === "POST") {
+        return handleFfaSecurityReport(request, env);
+      }
+
       if (url.pathname === "/api/v1/verify" && request.method === "POST") {
         return handleVerify(request, env);
       }
@@ -691,6 +695,31 @@ async function deriveLicenseKey(env, licenseId) {
 async function hashDevice(env, deviceId) {
   const bytes = await hmacBytes(env.HWID_PEPPER, `device:${deviceId}`);
   return bytesToHex(bytes);
+}
+
+async function createFfaReportToken(env, guildId, scriptId, deviceHash) {
+  const payload = bytesToBase64Url(enc.encode(JSON.stringify({
+    g: String(guildId),
+    s: String(scriptId),
+    d: String(deviceHash),
+    e: now() + 86400,
+  })));
+  const signature = bytesToHex(await hmacBytes(env.CONFIG_SECRET, `ffa-report:${payload}`));
+  return `${payload}.${signature}`;
+}
+
+async function verifyFfaReportToken(env, token, deviceHash) {
+  const [payload, signature, extra] = String(token || "").split(".");
+  if (!payload || !signature || extra || !/^[a-f0-9]{64}$/i.test(signature)) return null;
+  const expected = bytesToHex(await hmacBytes(env.CONFIG_SECRET, `ffa-report:${payload}`));
+  if (!await safeEqualText(signature.toLowerCase(), expected)) return null;
+  try {
+    const claims = JSON.parse(dec.decode(base64UrlToBytes(payload)));
+    if (!claims || claims.e < now() || claims.d !== deviceHash || !claims.g || !claims.s) return null;
+    return claims;
+  } catch {
+    return null;
+  }
 }
 
 function firstEightBytesToBigInt(bytes) {
@@ -945,7 +974,7 @@ async function handleSecurityReport(request, env) {
   const deviceId = cleanText(body?.device_id, 512);
   const reason = cleanText(body?.reason, 32);
   if (!key || !deviceId) return publicJson({ ok: false, error: "Missing key or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
   const license = await findLicenseByKey(env, key);
   const hash = await hashDevice(env, deviceId);
   // A report may only blacklist the authenticated key's already-bound device.
@@ -955,6 +984,30 @@ async function handleSecurityReport(request, env) {
   await env.DB.batch([
     env.DB.prepare("INSERT OR IGNORE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)").bind(license.guild_id, hash, reason, license.id, timestamp),
     env.DB.prepare("UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)").bind(timestamp, license.guild_id, hash, license.id),
+  ]);
+  return publicJson({ ok: true, status: "Blacklisted" });
+}
+
+async function handleFfaSecurityReport(request, env) {
+  const body = await readJson(request);
+  const deviceId = cleanText(body?.device_id, 512);
+  const reason = cleanText(body?.reason, 32);
+  const token = cleanText(body?.token, 2048);
+  if (!deviceId || !token) return publicJson({ ok: false, error: "Missing report proof or HWID" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+
+  const hash = await hashDevice(env, deviceId);
+  const claims = await verifyFfaReportToken(env, token, hash);
+  if (!claims) return publicJson({ ok: false, error: "Invalid report proof" }, 403);
+  const script = await env.DB.prepare("SELECT id, guild_id, enabled, ffa_enabled FROM scripts WHERE id = ? AND guild_id = ? LIMIT 1")
+    .bind(String(claims.s), String(claims.g))
+    .first();
+  if (!script || !script.enabled || !script.ffa_enabled) return publicJson({ ok: false, error: "FFA access is disabled" }, 403);
+
+  const timestamp = now();
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)").bind(script.guild_id, hash, reason, `ffa:${script.id}`, timestamp),
+    env.DB.prepare("UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND hwid_hash = ?").bind(timestamp, script.guild_id, hash),
   ]);
   return publicJson({ ok: true, status: "Blacklisted" });
 }
@@ -1263,7 +1316,8 @@ async function handleFfaPublicLoader(request, env, loaderId) {
   if (!guild?.active) return deniedSource();
   const deviceHash = await hashDevice(env, deviceId);
   if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
-  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true), {
+  const reportToken = await createFfaReportToken(env, guild.guild_id, script.id, deviceHash);
+  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true, reportToken), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "X-Eternal-Device", "x-content-type-options": "nosniff" },
   });
@@ -1302,13 +1356,19 @@ function sourceCredentials(request) {
 }
 
 
-function buildBootstrapSource(origin, scriptId, ffa = false) {
+function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "") {
   const apiUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa-loader" : "loader"}?script_id=${encodeURIComponent(scriptId)}`;
   const keySetup = ffa
     ? `local key="FFA"`
     : `local key=e.script_key or script_key
 if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to access this script. No key found.") return end`;
-  const reportAttempt = ffa ? "" : `    if __ea_request then
+  const reportAttempt = ffa ? `    if __ea_request then
+        pcall(__ea_request,{
+            Url=__ea_report_url,Method="POST",
+            Headers={["Content-Type"]="application/json"},
+            Body=H:JSONEncode({device_id=tostring(d),reason=reason,token=${JSON.stringify(ffaReportToken)}})
+        })
+    end` : `    if __ea_request then
         pcall(__ea_request,{
             Url=__ea_report_url,Method="POST",
             Headers={["Content-Type"]="application/json"},
@@ -1339,7 +1399,7 @@ if not d or tostring(d)=="" then
 end
 if not d or tostring(d)=="" then K("Missing HWID") return end
 local __ea_request=request or http_request or (syn and syn.request) or (http and http.request)
-local __ea_report_url=${JSON.stringify(`${String(origin).replace(/\/$/, "")}/api/v1/security/report`)}
+local __ea_report_url=${JSON.stringify(`${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`)}
 local __ea_stopped=false
 local __ea_protected_source=nil
 local function __ea_block(reason)
@@ -1526,7 +1586,29 @@ for _,env in ipairs(__ea_envs()) do
     end)
 end
 
--- Layer 7: lightweight integrity watchdog. If high-value guards are replaced,
+-- Layer 7: environment/introspection logger guard. These APIs expose closures,
+-- bytecode, constants, stack data, or the live execution environment.
+local __ea_logger_envs=__ea_envs()
+local function __ea_install_environment_guard(env,name)
+    local old=rawget(env,name)
+    if type(old)~="function" then return end
+    local wrap=function(...) return __ea_block("environment") end
+    env[name]=wrap
+    __ea_track(env,name,wrap)
+    pcall(function() if hookfunction then hookfunction(old,wrap) end end)
+end
+for _,env in ipairs(__ea_logger_envs) do
+    for _,name in ipairs({"getgenv","getrenv","getsenv","getfenv","getgc","getloadedmodules","getscriptclosure","getscriptbytecode","dumpstring","decompile"}) do
+        pcall(__ea_install_environment_guard,env,name)
+    end
+    if type(env.debug)=="table" then
+        for _,name in ipairs({"getupvalue","getupvalues","getconstant","getconstants","getproto","getprotos","getstack","getinfo"}) do
+            pcall(__ea_install_environment_guard,env.debug,name)
+        end
+    end
+end
+
+-- Layer 8: lightweight integrity watchdog. If high-value guards are replaced,
 -- terminate this client session rather than continuing with weakened guards.
 task.spawn(function()
     while not __ea_stopped and task.wait(2.5) do

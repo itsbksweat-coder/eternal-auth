@@ -75,8 +75,8 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {
   const {db,env}=await fixture();
   let response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua'),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-  assert.equal(response.status,403);
-  assert.equal(await response.text(),'Blacklisted');
+  assert.equal(response.status,200);
+  assert.match(await response.text(),/Eternal Auth FFA loader/);
   response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{'x-eternal-device':'ffa-device','x-eternal-execute':'1'}}),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,200);
   const bootstrap=await response.text();
@@ -96,14 +96,15 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(await response.text(),'Blacklisted');
 });
 
-test('first-stage source probes return Blacklisted and verified keyed probes persist the HWID ban', async () => {
+test('legacy first-stage requests receive only a compatibility launcher, never protected source', async () => {
   const {db,env}=await fixture();
   const probe=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{authorization:'Bearer valid-key','x-eternal-device':'probe-device'}});
   const response=await api.handlePublicLoader(probe,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
-  assert.equal(response.status,403);
-  assert.equal(await response.text(),'Blacklisted');
-  assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'loader_probe');
-  assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'security_blacklisted');
+  assert.equal(response.status,200);
+  const source=await response.text();
+  assert.match(source,/X-Eternal-Execute/);
+  assert.doesNotMatch(source,/SECRET_PROTECTED_CONTENT/);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 });
 
 test('panel-scoped license cannot load a script attached to another panel', async () => {

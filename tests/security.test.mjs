@@ -70,6 +70,9 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
   assert.match(lua,/https:\/\/auth.test\/api\/v1\/security\/report/);
   assert.match(lua,/__ea_protected_source=s/);
   assert.doesNotMatch(lua,/\$\{/);
+  const extractionLayer=lua.slice(lua.indexOf('-- Layer 8:'),lua.indexOf('-- Layer 9:'));
+  assert.match(extractionLayer,/decompile|getscriptbytecode/);
+  assert.doesNotMatch(extractionLayer,/"getgenv"|"getfenv"|"gethui"|"hookfunction"|"hookmetamethod"/);
 });
 
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {

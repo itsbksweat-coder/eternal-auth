@@ -934,10 +934,26 @@ async function isBlacklisted(env, guildId, discordId) {
   return row;
 }
 
+async function recoverLegacyLoaderProbe(env, license, deviceHash) {
+  if (!license || !deviceHash) return false;
+  const falsePositive = await env.DB.prepare(
+    "SELECT 1 AS found FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ? AND reason = 'loader_probe' LIMIT 1"
+  ).bind(license.guild_id, deviceHash, license.id).first();
+  if (!falsePositive) return false;
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ? AND reason = 'loader_probe'").bind(license.guild_id, deviceHash, license.id),
+    env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE id = ? AND status = 'security_blacklisted'").bind(now(), license.id),
+  ]);
+  license.status = "active";
+  return true;
+}
+
 async function validateLicense(env, license, deviceId = null, shouldBindDevice = true) {
   if (!license) return { ok: false, error: "Invalid key" };
 
-  if (license.status === "security_blacklisted" || await deviceBlocked(env, license.guild_id, license.hwid_hash, deviceId ? await hashDevice(env, deviceId) : null)) return { ok: false, error: "Blacklisted" };
+  const requestedDeviceHash = deviceId ? await hashDevice(env, deviceId) : null;
+  await recoverLegacyLoaderProbe(env, license, requestedDeviceHash);
+  if (license.status === "security_blacklisted" || await deviceBlocked(env, license.guild_id, license.hwid_hash, requestedDeviceHash)) return { ok: false, error: "Blacklisted" };
 
   const blocked = await isBlacklisted(env, license.guild_id, license.discord_id);
   if (blocked) return { ok: false, error: "License is blacklisted", reason: blocked.reason || null };
@@ -956,7 +972,7 @@ async function validateLicense(env, license, deviceId = null, shouldBindDevice =
   }
 
   if (deviceId) {
-    const deviceHash = await hashDevice(env, deviceId);
+    const deviceHash = requestedDeviceHash;
     if (!license.hwid_hash && shouldBindDevice) {
       if (!await bindDevice(env, license, deviceHash, now())) return { ok: false, error: "Device mismatch. Reset HWID first." };
       license.hwid_hash = deviceHash;
@@ -1110,6 +1126,7 @@ async function handleProtectedLoader(request, env, ctx) {
     return deniedSource();
   }
 
+  await recoverLegacyLoaderProbe(env, row, deviceHash);
   if (row.status === "security_blacklisted" || await deviceBlocked(env, row.guild_id, deviceHash, row.hwid_hash)) {
     return deniedSource();
   }
@@ -2997,14 +3014,17 @@ async function handleDiscordInteraction(request, env, ctx) {
   if (name === "unblacklist") {
     if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
     const target = cleanText(opts.user, 64);
-    await env.DB.prepare("DELETE FROM blacklists WHERE guild_id = ? AND discord_id = ?")
-      .bind(guildId, target)
-      .run();
-    await env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND discord_id = ? AND status = 'blacklisted'")
-      .bind(now(), guildId, target)
-      .run();
-    await audit(env, guildId, "discord.unblacklist", userId, target, {});
-    return discordMessage(`✅ Removed blacklist for <@${target}>.`);
+    const targetLicenses = await env.DB.prepare("SELECT id, hwid_hash FROM licenses WHERE guild_id = ? AND discord_id = ?").bind(guildId, target).all();
+    const statements = [
+      env.DB.prepare("DELETE FROM blacklists WHERE guild_id = ? AND discord_id = ?").bind(guildId, target),
+      env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND discord_id = ? AND status IN ('blacklisted','security_blacklisted')").bind(now(), guildId, target),
+    ];
+    for (const license of targetLicenses.results || []) {
+      statements.push(env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND (license_id = ? OR hwid_hash = ?)").bind(guildId, license.id, license.hwid_hash || ""));
+    }
+    await env.DB.batch(statements);
+    await audit(env, guildId, "discord.unblacklist", userId, target, { hwid_cleared: true });
+    return discordMessage(`✅ Removed Discord and HWID blacklists for <@${target}>.`);
   }
 
   if (name === "compensate") {

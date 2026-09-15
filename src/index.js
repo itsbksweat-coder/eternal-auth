@@ -1459,10 +1459,12 @@ local __ea_request=request or http_request or (syn and syn.request) or (http and
 local __ea_report_url=${JSON.stringify(`${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`)}
 local __ea_stopped=false
 local __ea_protected_source=nil
+local __ea_scrub_gui=nil
 local function __ea_block(reason)
     if __ea_stopped then return "Blacklisted" end
     __ea_stopped=true
 ${reportAttempt}
+    if type(__ea_scrub_gui)=="function" then pcall(__ea_scrub_gui) end
     K("Blacklisted")
     return "Blacklisted"
 end
@@ -1635,6 +1637,22 @@ local function __ea_watch_text_root(root)
     __ea_scan_text_object(root)
     pcall(function() for _,obj in ipairs(root:GetDescendants()) do __ea_scan_text_object(obj) end end)
     pcall(function() root.DescendantAdded:Connect(function(obj) task.defer(__ea_scan_text_object,obj) end) end)
+end
+__ea_scrub_gui=function()
+    local seen={}
+    local function replace(obj)
+        if seen[obj] then return end
+        seen[obj]=true
+        pcall(function()
+            if obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton") then
+                obj.Text="Blacklisted"
+            end
+        end)
+    end
+    for _,root in ipairs(__ea_text_roots) do
+        replace(root)
+        pcall(function() for _,obj in ipairs(root:GetDescendants()) do replace(obj) end end)
+    end
 end
 pcall(function()
     if not hookmetamethod or not newcclosure then return end

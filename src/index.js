@@ -1468,15 +1468,17 @@ ${reportAttempt}
 end
 
 -- Match actual delivered source instead of banning arbitrary long UI text.
--- Encoded, transformed, tiny fragments or preinstalled hooks can evade this.
+-- A 96-byte exact fragment is long enough to avoid ordinary-label matches while
+-- still catching viewers that split the source across several GUI pages.
+local __ea_min_fragment=96
 local function __ea_source_like(v)
     if type(v)~="string" or not __ea_protected_source then return false end
     local src=__ea_protected_source
     if #src>=16 and string.find(v,src,1,true) then return true end
-    if #v>=160 and string.find(src,v,1,true) then return true end
-    if #v>=160 and #src>=160 then
-        for pos=1,math.min(#v-159,65536),80 do
-            if string.find(src,string.sub(v,pos,pos+159),1,true) then return true end
+    if #v>=__ea_min_fragment and string.find(src,v,1,true) then return true end
+    if #v>=__ea_min_fragment and #src>=__ea_min_fragment then
+        for pos=1,math.min(#__ea_protected_source-__ea_min_fragment+1,65536),48 do
+            if string.find(v,string.sub(src,pos,pos+__ea_min_fragment-1),1,true) then return true end
         end
     end
     return false
@@ -1561,12 +1563,14 @@ local function __ea_install_clipboard(env,name)
     __ea_track(env,name,wrapper)
 end
 for _,env in ipairs(__ea_envs()) do
-    for _,name in ipairs({"setclipboard","toclipboard","writeclipboard","set_clipboard","setrbxclipboard"}) do
+    for _,name in ipairs({"setclipboard","toclipboard","writeclipboard","set_clipboard","setrbxclipboard","copyclipboard","clipboardset","setclip"}) do
         pcall(__ea_install_clipboard,env,name)
     end
-    if type(env.clipboard)=="table" then
-        for _,name in ipairs({"set","write","copy"}) do
-            pcall(__ea_install_clipboard,env.clipboard,name)
+    for _,tableName in ipairs({"clipboard","Clipboard"}) do
+        if type(env[tableName])=="table" then
+            for _,name in ipairs({"set","write","copy","setclipboard","write_clipboard"}) do
+                pcall(__ea_install_clipboard,env[tableName],name)
+            end
         end
     end
 end
@@ -1588,12 +1592,55 @@ for _,env in ipairs(__ea_envs()) do
     end
 end
 
--- Layer 5: TextBox/TextLabel/TextButton source dumping.
+-- Layer 5: TextBox/TextLabel/TextButton source dumping. The metamethod catches
+-- direct writes; property watchers catch executor-specific write paths and GUI
+-- viewers that reuse an existing label for multiple source pages.
+local __ea_gui_fragments={}
+local __ea_gui_fragment_bytes=0
+local __ea_text_roots={}
+local __ea_text_watched={}
+local function __ea_gui_source_like(value)
+    if __ea_source_like(value) then return true end
+    if type(value)~="string" or not __ea_protected_source or #value<8 then return false end
+    table.insert(__ea_gui_fragments,value)
+    __ea_gui_fragment_bytes=__ea_gui_fragment_bytes+#value
+    while #__ea_gui_fragments>24 or __ea_gui_fragment_bytes>262144 do
+        local removed=table.remove(__ea_gui_fragments,1)
+        __ea_gui_fragment_bytes=__ea_gui_fragment_bytes-#removed
+    end
+    if #__ea_gui_fragments<2 then return false end
+    return __ea_source_like(table.concat(__ea_gui_fragments))
+end
+local function __ea_scan_text_object(obj)
+    if __ea_stopped or __ea_text_watched[obj] then return end
+    local ok,isText=pcall(function()
+        return obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton")
+    end)
+    if not ok or not isText then return end
+    __ea_text_watched[obj]=true
+    local function scan()
+        if __ea_stopped then return end
+        local readOk,value=pcall(function() return obj.Text end)
+        if readOk and __ea_gui_source_like(value) then
+            pcall(function() obj.Text="Blacklisted" end)
+            __ea_block("gui")
+        end
+    end
+    scan()
+    pcall(function() obj:GetPropertyChangedSignal("Text"):Connect(scan) end)
+end
+local function __ea_watch_text_root(root)
+    if not root then return end
+    table.insert(__ea_text_roots,root)
+    __ea_scan_text_object(root)
+    pcall(function() for _,obj in ipairs(root:GetDescendants()) do __ea_scan_text_object(obj) end end)
+    pcall(function() root.DescendantAdded:Connect(function(obj) task.defer(__ea_scan_text_object,obj) end) end)
+end
 pcall(function()
     if not hookmetamethod or not newcclosure then return end
     local oldNewIndex
     oldNewIndex=hookmetamethod(game,"__newindex",newcclosure(function(obj,keyName,value)
-        if keyName=="Text" and __ea_source_like(value) then
+        if keyName=="Text" and __ea_gui_source_like(value) then
             local ok,isText=pcall(function()
                 return obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton")
             end)
@@ -1606,6 +1653,9 @@ pcall(function()
         return oldNewIndex(obj,keyName,value)
     end))
 end)
+pcall(function() if type(gethui)=="function" then __ea_watch_text_root(gethui()) end end)
+pcall(function() __ea_watch_text_root(game:GetService("CoreGui")) end)
+pcall(function() if lp then __ea_watch_text_root(lp:FindFirstChildOfClass("PlayerGui")) end end)
 
 -- Layer 6: common executor HTTP/request exfiltration sinks. Requests only get
 -- blocked when their outgoing body contains source-like text.
@@ -1730,6 +1780,15 @@ if code~=200 then
 end
 if __ea_stopped then return end
 __ea_protected_source=s
+-- Catch source placed into a GUI immediately before the protected response was
+-- assigned, then keep property watchers active for later page changes.
+for _,root in ipairs(__ea_text_roots) do
+    pcall(function() for _,obj in ipairs(root:GetDescendants()) do
+        __ea_text_watched[obj]=nil
+        __ea_scan_text_object(obj)
+    end end)
+end
+if __ea_stopped then return end
 local f,err=loadstring(s)
 if not f then K("Eternal Auth loader error: "..tostring(err)) return end
 f()`;

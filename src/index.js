@@ -974,7 +974,7 @@ async function handleSecurityReport(request, env) {
   const deviceId = cleanText(body?.device_id, 512);
   const reason = cleanText(body?.reason, 32);
   if (!key || !deviceId) return publicJson({ ok: false, error: "Missing key or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
   const license = await findLicenseByKey(env, key);
   const hash = await hashDevice(env, deviceId);
   // A report may only blacklist the authenticated key's already-bound device.
@@ -994,7 +994,7 @@ async function handleFfaSecurityReport(request, env) {
   const reason = cleanText(body?.reason, 32);
   const token = cleanText(body?.token, 2048);
   if (!deviceId || !token) return publicJson({ ok: false, error: "Missing report proof or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
 
   const hash = await hashDevice(env, deviceId);
   const claims = await verifyFfaReportToken(env, token, hash);
@@ -1395,7 +1395,7 @@ if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to a
   const protectedUrl = ffa
     ? `local u="${apiUrl}&device_id="..H:UrlEncode(tostring(d))`
     : `local u="${apiUrl}&key="..H:UrlEncode(tostring(key)).."&device_id="..H:UrlEncode(tostring(d))`;
-  return `-- Eternal Auth fast bootstrap + eight-layer source leak guard
+  return `-- Eternal Auth fast bootstrap + nine-layer source leak guard
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
 local lp=P.LocalPlayer
@@ -1603,19 +1603,63 @@ for _,env in ipairs(__ea_envs()) do
     end)
 end
 
--- Layer 7: environment/introspection logger guard. These APIs expose closures,
+-- Layer 7: detect common HTTP/source/remote spy interfaces, including ones
+-- inserted after startup. Exact multi-word signatures reduce false positives.
+local __ea_spy_signatures={
+    "http spy","http logger","httpspy","http_spy","httplogger",
+    "remote spy","remote logger","remotespy","simple spy","simplespy",
+    "source viewer","script viewer","lua viewer","hydroxide"
+}
+local function __ea_spy_like(v)
+    if type(v)~="string" then return false end
+    local s=string.lower(v)
+    for _,sig in ipairs(__ea_spy_signatures) do
+        if string.find(s,sig,1,true) then return true end
+    end
+    return false
+end
+local function __ea_scan_spy_object(obj)
+    pcall(function()
+        if __ea_spy_like(obj.Name) then __ea_block("http_spy") return end
+        if (obj:IsA("TextLabel") or obj:IsA("TextBox") or obj:IsA("TextButton")) and __ea_spy_like(obj.Text) then
+            obj.Text="Blacklisted"
+            __ea_block("http_spy")
+        end
+    end)
+end
+local function __ea_watch_spy_root(root)
+    if not root then return end
+    __ea_scan_spy_object(root)
+    pcall(function() for _,obj in ipairs(root:GetDescendants()) do __ea_scan_spy_object(obj) end end)
+    pcall(function() root.DescendantAdded:Connect(function(obj) task.defer(__ea_scan_spy_object,obj) end) end)
+end
+pcall(function() if type(gethui)=="function" then __ea_watch_spy_root(gethui()) end end)
+pcall(function() __ea_watch_spy_root(game:GetService("CoreGui")) end)
+pcall(function() if lp then __ea_watch_spy_root(lp:FindFirstChildOfClass("PlayerGui")) end end)
+for _,env in ipairs(__ea_envs()) do
+    pcall(function()
+        for name,value in pairs(env) do
+            if __ea_spy_like(name) and (type(value)=="function" or type(value)=="table") then
+                __ea_block("http_spy") return
+            end
+        end
+    end)
+end
+
+-- Layer 8: environment/introspection logger guard. These APIs expose closures,
 -- bytecode, constants, stack data, or the live execution environment.
 local __ea_logger_envs=__ea_envs()
+local __ea_hook_fn=hookfunction
 local function __ea_install_environment_guard(env,name)
     local old=rawget(env,name)
     if type(old)~="function" then return end
     local wrap=function(...) return __ea_block("environment") end
     env[name]=wrap
     __ea_track(env,name,wrap)
-    pcall(function() if hookfunction then hookfunction(old,wrap) end end)
+    pcall(function() if __ea_hook_fn then __ea_hook_fn(old,wrap) end end)
 end
 for _,env in ipairs(__ea_logger_envs) do
-    for _,name in ipairs({"getgenv","getrenv","getsenv","getfenv","getgc","getloadedmodules","getscriptclosure","getscriptbytecode","dumpstring","decompile"}) do
+    for _,name in ipairs({"getgenv","getrenv","getsenv","getfenv","getgc","getloadedmodules","getscriptclosure","getscriptbytecode","dumpstring","decompile","getrawmetatable","setreadonly","make_writeable","make_readonly","hookfunction","hookmetamethod","gethui","getinstances","getnilinstances"}) do
         pcall(__ea_install_environment_guard,env,name)
     end
     if type(env.debug)=="table" then
@@ -1625,7 +1669,7 @@ for _,env in ipairs(__ea_logger_envs) do
     end
 end
 
--- Layer 8: lightweight integrity watchdog. If high-value guards are replaced,
+-- Layer 9: lightweight integrity watchdog. If high-value guards are replaced,
 -- terminate this client session rather than continuing with weakened guards.
 task.spawn(function()
     while not __ea_stopped and task.wait(2.5) do

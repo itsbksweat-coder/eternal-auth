@@ -107,6 +107,20 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 });
 
+test('legacy loader_probe false-positive HWID bans self-recover but real security bans do not', async () => {
+  const {db,env}=await fixture();
+  const hash=await api.hashDevice(env,'legacy-device');
+  db.prepare("UPDATE licenses SET hwid_hash=?,status='security_blacklisted' WHERE id='l'").run(hash);
+  db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'loader_probe','l',0)").run(hash);
+  let response=await api.handleProtectedLoader(request({key:'valid-key',device_id:'legacy-device',script_id:'s'}),env);
+  assert.equal(response.status,200);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
+  db.prepare("UPDATE licenses SET status='security_blacklisted' WHERE id='l'").run();
+  db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'clipboard','l',0)").run(hash);
+  response=await api.handleProtectedLoader(request({key:'valid-key',device_id:'legacy-device',script_id:'s'}),env);
+  assert.equal(response.status,403);
+});
+
 test('panel-scoped license cannot load a script attached to another panel', async () => {
   const {db,env}=await fixture();
   db.prepare("UPDATE licenses SET panel_id='p' WHERE id='l'").run();

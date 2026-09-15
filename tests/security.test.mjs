@@ -7,7 +7,7 @@ let source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
 source = source.replace('import { DurableObject } from "cloudflare:workers";', 'class DurableObject {}');
 for (const file of ['dm-responder.js', 'device-security.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
 source = source.replace('"../public/entry-loader.js"', JSON.stringify(new URL('../public/entry-loader.js', import.meta.url).href));
-source += '\nexport { handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource };';
+source += '\nexport { handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource };';
 const api = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 async function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -16,7 +16,7 @@ async function fixture() {
     let args = [];
     const stmt = { bind(...values) { args = values; return stmt; }, async first() { return db.prepare(sql).get(...args) || null; }, async run() { const r = db.prepare(sql).run(...args); return { meta: { changes: Number(r.changes) } }; }, async all() { return { results: db.prepare(sql).all(...args) }; } }; return stmt;
   };
-  const env = { HWID_PEPPER: 'test-pepper', DB: { prepare, async batch(statements) { const out = []; for (const s of statements) out.push(await s.run()); return out; } } };
+  const env = { HWID_PEPPER: 'test-pepper', CONFIG_SECRET: 'test-config-secret', DB: { prepare, async batch(statements) { const out = []; for (const s of statements) out.push(await s.run()); return out; } } };
   db.prepare('INSERT INTO guilds (guild_id,created_at,updated_at) VALUES (?,0,0)').run('g');
   const keyHash = await api.sha256Hex('valid-key');
   db.prepare("INSERT INTO licenses (id,guild_id,key_hash,discord_id,created_at,updated_at) VALUES ('l','g',?,'u',0,0)").run(keyHash);
@@ -80,11 +80,29 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(response.status,200);
   const bootstrap=await response.text();
   assert.match(bootstrap,/api\/v1\/ffa-loader/);
+  assert.match(bootstrap,/api\/v1\/ffa\/security\/report/);
+  assert.match(bootstrap,/environment/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);
   response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
   assert.equal(response.status,200);
   assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
   db.prepare("UPDATE scripts SET ffa_enabled=0 WHERE id='s'").run();
+  response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
+  assert.equal(response.status,403);
+  assert.equal(await response.text(),'Blacklisted');
+});
+
+test('FFA signed reports blacklist only the reporting device', async () => {
+  const {db,env}=await fixture();
+  const deviceHash=await api.hashDevice(env,'ffa-device');
+  const token=await api.createFfaReportToken(env,'g','s',deviceHash);
+  let response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'other-device',reason:'environment',token})}),env);
+  assert.equal(response.status,403);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
+  response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'ffa-device',reason:'environment',token})}),env);
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).status,'Blacklisted');
+  assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'environment');
   response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
   assert.equal(response.status,403);
   assert.equal(await response.text(),'Blacklisted');

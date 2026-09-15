@@ -82,6 +82,9 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.match(bootstrap,/api\/v1\/ffa-loader/);
   assert.match(bootstrap,/api\/v1\/ffa\/security\/report/);
   assert.match(bootstrap,/environment/);
+  assert.match(bootstrap,/http_spy/);
+  assert.match(bootstrap,/http logger/);
+  assert.match(bootstrap,/hookmetamethod/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);
   response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
   assert.equal(response.status,200);

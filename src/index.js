@@ -1654,6 +1654,14 @@ async function ensureBackendPersistenceSchema(env) {
       await env.DB.prepare("ALTER TABLE panels ADD COLUMN script_id TEXT").run();
     }
 
+    // v1.8.8 FFA is an additive script setting. Self-migrate existing D1
+    // databases so Git-connected deployments do not need a separate CLI step.
+    const scriptInfo = await env.DB.prepare("PRAGMA table_info(scripts)").all();
+    const scriptColumns = Array.isArray(scriptInfo?.results) ? scriptInfo.results : [];
+    if (scriptColumns.length && !scriptColumns.some((column) => String(column.name) === "ffa_enabled")) {
+      await env.DB.prepare("ALTER TABLE scripts ADD COLUMN ffa_enabled INTEGER NOT NULL DEFAULT 0").run();
+    }
+
     return true;
   })().catch((error) => {
     backendSchemaReadyPromise = null;

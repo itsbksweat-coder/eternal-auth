@@ -17,13 +17,13 @@ async function fixture() {
     const stmt = { bind(...values) { args = values; return stmt; }, async first() { return db.prepare(sql).get(...args) || null; }, async run() { const r = db.prepare(sql).run(...args); return { meta: { changes: Number(r.changes) } }; }, async all() { return { results: db.prepare(sql).all(...args) }; } }; return stmt;
   };
   const env = { HWID_PEPPER: 'test-pepper', CONFIG_SECRET: 'test-config-secret', DB: { prepare, async batch(statements) { const out = []; for (const s of statements) out.push(await s.run()); return out; } } };
-  db.prepare('INSERT INTO guilds (guild_id,created_at,updated_at) VALUES (?,0,0)').run('g');
+  db.prepare('INSERT INTO guilds (guild_id,created_at,updated_at) VALUES (?,0,0)').run('123456789012345678');
   const keyHash = await api.sha256Hex('valid-key');
-  db.prepare("INSERT INTO licenses (id,guild_id,key_hash,discord_id,created_at,updated_at) VALUES ('l','g',?,'u',0,0)").run(keyHash);
-  db.prepare("INSERT INTO scripts (id,guild_id,loader_id,name,content,version,enabled,ffa_enabled,created_at,updated_at) VALUES ('s','g','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Test','SECRET_PROTECTED_CONTENT','1',1,1,0,0)").run();
+  db.prepare("INSERT INTO licenses (id,guild_id,key_hash,discord_id,created_at,updated_at) VALUES ('l','123456789012345678',?,'u',0,0)").run(keyHash);
+  db.prepare("INSERT INTO scripts (id,guild_id,loader_id,name,content,version,enabled,ffa_enabled,created_at,updated_at) VALUES ('s','123456789012345678','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Test','SECRET_PROTECTED_CONTENT','1',1,1,0,0)").run();
   return { db, env };
 }
-const request = (params) => new Request('https://auth.test/api/v1/loader?' + new URLSearchParams(params));
+const request = (params) => new Request('https://auth.test/api/v1/loader?' + new URLSearchParams(params),{headers:{'x-eternal-execute':'1'}});
 const report = (body) => new Request('https://auth.test/api/v1/security/report', { method: 'POST', body: JSON.stringify(body) });
 test('missing key and missing HWID return no protected source', async () => {
   const { env } = await fixture();
@@ -46,13 +46,13 @@ test('authenticated exposure report bans bound device, rejects other devices and
   response = await api.handleProtectedLoader(request({key:'valid-key',device_id:'a'}), env);
   assert.equal(response.status, 403);
   assert.match(await response.text(), /Blacklisted/);
-  const result = await api.resetOwnHwid(env, {guild_id:'g'}, 'u', {waitUntil(){}});
+  const result = await api.resetOwnHwid(env, {guild_id:'123456789012345678'}, 'u', {waitUntil(){}});
   assert.match(await result.text(), /Blacklisted/);
   db.prepare("UPDATE licenses SET hwid_hash = NULL WHERE id = 'l'").run();
   response = await api.handleProtectedLoader(request({key:'valid-key',device_id:'b'}), env);
   assert.equal(response.status, 403);
   const secondHash = await api.sha256Hex('second-key');
-  db.prepare("INSERT INTO licenses (id,guild_id,key_hash,created_at,updated_at) VALUES ('l2','g',?,0,0)").run(secondHash);
+  db.prepare("INSERT INTO licenses (id,guild_id,key_hash,created_at,updated_at) VALUES ('l2','123456789012345678',?,0,0)").run(secondHash);
   response = await api.handleProtectedLoader(request({key:'second-key',device_id:'a'}), env);
   assert.equal(response.status, 403);
 });
@@ -76,7 +76,7 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   let response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua'),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,403);
   assert.equal(await response.text(),'Blacklisted');
-  response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{'x-eternal-device':'ffa-device'}}),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{'x-eternal-device':'ffa-device','x-eternal-execute':'1'}}),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,200);
   const bootstrap=await response.text();
   assert.match(bootstrap,/api\/v1\/ffa-loader/);
@@ -92,10 +92,20 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(await response.text(),'Blacklisted');
 });
 
+test('first-stage source probes return Blacklisted and verified keyed probes persist the HWID ban', async () => {
+  const {db,env}=await fixture();
+  const probe=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{authorization:'Bearer valid-key','x-eternal-device':'probe-device'}});
+  const response=await api.handlePublicLoader(probe,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(response.status,403);
+  assert.equal(await response.text(),'Blacklisted');
+  assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'loader_probe');
+  assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'security_blacklisted');
+});
+
 test('FFA signed reports blacklist only the reporting device', async () => {
   const {db,env}=await fixture();
   const deviceHash=await api.hashDevice(env,'ffa-device');
-  const token=await api.createFfaReportToken(env,'g','s',deviceHash);
+  const token=await api.createFfaReportToken(env,'123456789012345678','s',deviceHash);
   let response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'other-device',reason:'environment',token})}),env);
   assert.equal(response.status,403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
@@ -111,6 +121,6 @@ test('FFA signed reports blacklist only the reporting device', async () => {
 test('user reset reports remaining seconds within five-minute cooldown', async () => {
   const {db,env}=await fixture();
   db.prepare("UPDATE licenses SET last_hwid_reset=? WHERE id='l'").run(Math.floor(Date.now()/1000)-60);
-  const response=await api.resetOwnHwid(env,{guild_id:'g'},'u',{waitUntil(){}});
+  const response=await api.resetOwnHwid(env,{guild_id:'123456789012345678'},'u',{waitUntil(){}});
   assert.match(await response.text(), /second\(s\)/);
 });

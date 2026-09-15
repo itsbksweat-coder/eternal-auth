@@ -824,7 +824,7 @@ async function ensureDefaultScript(env, guildId) {
   return ensureScriptLoaderId(env, script);
 }
 
-async function createLicense(env, { guildId, discordId = null, days = -1, note = null }) {
+async function createLicense(env, { guildId, discordId = null, panelId = null, days = -1, note = null }) {
   const timestamp = now();
   const id = crypto.randomUUID();
   const rawKey = await deriveLicenseKey(env, id);
@@ -833,10 +833,10 @@ async function createLicense(env, { guildId, discordId = null, days = -1, note =
 
   await env.DB.prepare(
     `INSERT INTO licenses
-      (id, guild_id, key_hash, discord_id, status, auth_expire, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`
+      (id, guild_id, key_hash, discord_id, panel_id, status, auth_expire, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`
   )
-    .bind(id, guildId, keyHash, discordId, authExpire, note, timestamp, timestamp)
+    .bind(id, guildId, keyHash, discordId, panelId, authExpire, note, timestamp, timestamp)
     .run();
 
   return { id, key: rawKey, auth_expire: authExpire };
@@ -1040,6 +1040,10 @@ async function handleVerify(request, env) {
   }
 
   if (script && !script.enabled) return publicJson({ ok: false, error: "Script is disabled" }, 503);
+  if (license.panel_id) {
+    const panel = await getPanel(env, license.guild_id, license.panel_id);
+    if (!panel || !script || panel.script_id !== script.id) return publicJson({ ok: false, error: "License is not assigned to this panel" }, 403);
+  }
 
   return publicJson({
     ok: true,
@@ -1173,6 +1177,10 @@ async function handleProtectedLoader(request, env, ctx) {
   if (!script || !script.enabled || !script.content) {
     return deniedSource();
   }
+  if (row.panel_id) {
+    const assignedPanel = await getPanel(env, row.guild_id, row.panel_id);
+    if (!assignedPanel || assignedPanel.script_id !== script.id) return deniedSource();
+  }
 
   const executionLog = env.DB.prepare("INSERT INTO executions (guild_id, license_id, occurred_at) VALUES (?, ?, ?)")
     .bind(row.guild_id, row.id, timestamp)
@@ -1301,6 +1309,10 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
   }
 
   if (!guild || !script || !guild.active || !script.enabled || !script.content || license.guild_id !== guild.guild_id) return deniedSource();
+  if (license.panel_id) {
+    const assignedPanel = await getPanel(env, guild.guild_id, license.panel_id);
+    if (!assignedPanel || assignedPanel.script_id !== script.id) return deniedSource();
+  }
   const valid = await validateLicense(env, license, credentials.deviceId, true);
   if (!valid.ok) return deniedSource();
   if (!hasLoaderExecutionIntent(request)) {
@@ -1805,6 +1817,13 @@ async function ensureBackendPersistenceSchema(env) {
       await env.DB.prepare("ALTER TABLE scripts ADD COLUMN ffa_enabled INTEGER NOT NULL DEFAULT 0").run();
     }
 
+    const licenseInfo = await env.DB.prepare("PRAGMA table_info(licenses)").all();
+    const licenseColumns = Array.isArray(licenseInfo?.results) ? licenseInfo.results : [];
+    if (licenseColumns.length && !licenseColumns.some((column) => String(column.name) === "panel_id")) {
+      await env.DB.prepare("ALTER TABLE licenses ADD COLUMN panel_id TEXT").run();
+    }
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)").run();
+
     return true;
   })().catch((error) => {
     backendSchemaReadyPromise = null;
@@ -1984,6 +2003,26 @@ async function saveAdminState(env, body) {
 }
 
 async function handleAdminApi(request, env, url, ctx) {
+  if (url.pathname === "/api/admin/discord/sync-commands" && request.method === "POST") {
+    if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_BOT_TOKEN) return json({ ok: false, error: "Discord application secrets are not configured" }, 503);
+    const endpoint = `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/commands`;
+    const headers = { authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "content-type": "application/json" };
+    const currentResponse = await fetch(endpoint, { headers });
+    if (!currentResponse.ok) return json({ ok: false, error: `Discord command read failed (${currentResponse.status})` }, 502);
+    const current = await currentResponse.json();
+    const allowed = ["type", "name", "name_localizations", "description", "description_localizations", "options", "default_member_permissions", "dm_permission", "nsfw", "integration_types", "contexts"];
+    const commands = current.map((command) => Object.fromEntries(allowed.filter((key) => command[key] !== undefined).map((key) => [key, command[key]])));
+    const whitelist = commands.find((command) => command.name === "whitelist");
+    if (!whitelist) return json({ ok: false, error: "The Discord /whitelist command is not registered" }, 404);
+    whitelist.options = (whitelist.options || []).filter((option) => option.name !== "panel");
+    const userIndex = whitelist.options.findIndex((option) => option.name === "user");
+    whitelist.options.splice(userIndex >= 0 ? userIndex + 1 : 0, 0, { name: "panel", description: "Panel this license can access", type: 3, required: true, autocomplete: true });
+    const updateResponse = await fetch(endpoint, { method: "PUT", headers, body: JSON.stringify(commands) });
+    if (!updateResponse.ok) return json({ ok: false, error: `Discord command update failed (${updateResponse.status})` }, 502);
+    const updated = await updateResponse.json();
+    return json({ ok: true, commands: updated.length });
+  }
+
   if (url.pathname === "/api/admin/state" && request.method === "GET") {
     return json({ ok: true, state: await getAdminState(env) });
   }
@@ -2150,21 +2189,21 @@ async function handleAdminApi(request, env, url, ctx) {
   if (url.pathname === "/api/admin/licenses" && request.method === "GET") {
     const guildId = cleanText(url.searchParams.get("guild_id"), 64);
     const q = cleanText(url.searchParams.get("q"), 128);
-    let sql = `SELECT id, guild_id, discord_id, status, auth_expire, note, hwid_hash, last_hwid_reset, created_at, updated_at
-               FROM licenses`;
+    let sql = `SELECT l.id, l.guild_id, l.discord_id, l.panel_id, p.name AS panel_name, l.status, l.auth_expire, l.note, l.hwid_hash, l.last_hwid_reset, l.created_at, l.updated_at
+               FROM licenses l LEFT JOIN panels p ON p.id = l.panel_id AND p.guild_id = l.guild_id`;
     const args = [];
     const where = [];
     if (guildId) {
-      where.push("guild_id = ?");
+      where.push("l.guild_id = ?");
       args.push(guildId);
     }
     if (q) {
-      where.push("(discord_id LIKE ? OR note LIKE ? OR id LIKE ?)");
+      where.push("(l.discord_id LIKE ? OR l.note LIKE ? OR l.id LIKE ? OR p.name LIKE ?)");
       const like = `%${q}%`;
-      args.push(like, like, like);
+      args.push(like, like, like, like);
     }
     if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
-    sql += " ORDER BY created_at DESC LIMIT 250";
+    sql += " ORDER BY l.created_at DESC LIMIT 250";
     const result = await env.DB.prepare(sql).bind(...args).all();
     return json({ ok: true, licenses: result.results || [] });
   }
@@ -2177,8 +2216,11 @@ async function handleAdminApi(request, env, url, ctx) {
     if (!guild) return json({ ok: false, error: "Unknown guild. Run /login in Discord first." }, 404);
 
     const discordId = cleanText(body?.discord_id, 64);
+    const panelId = cleanText(body?.panel_id, 128);
     const days = Number(body?.days ?? -1);
     const note = cleanText(body?.note, 300);
+    const panel = await getPanel(env, guildId, panelId);
+    if (!panel?.script_id) return json({ ok: false, error: "Select an active panel linked to a script" }, 400);
     if (discordId && (await isBlacklisted(env, guildId, discordId))) {
       return json({ ok: false, error: "That Discord user is blacklisted" }, 409);
     }
@@ -2187,8 +2229,8 @@ async function handleAdminApi(request, env, url, ctx) {
       if (existing) return json({ ok: false, error: "User already has an active license" }, 409);
     }
 
-    const license = await createLicense(env, { guildId, discordId, days, note });
-    await audit(env, guildId, "admin.whitelist", "dashboard", discordId || license.id, { days, note });
+    const license = await createLicense(env, { guildId, discordId, panelId: panel.id, days, note });
+    await audit(env, guildId, "admin.whitelist", "dashboard", discordId || license.id, { days, note, panel_id: panel.id });
     return json({ ok: true, license });
   }
 
@@ -2674,7 +2716,23 @@ async function handleDiscordInteraction(request, env, ctx) {
   const interaction = await verifyDiscordRequest(request, env);
   if (!interaction) return new Response("Invalid request signature", { status: 401 });
 
+  await ensureBackendPersistenceSchema(env);
+
   if (interaction.type === 1) return json({ type: 1 });
+
+  if (interaction.type === 4) {
+    const guildId = interaction.guild_id;
+    const command = interaction.data?.name;
+    const focused = (interaction.data?.options || []).find((option) => option.focused);
+    if (command !== "whitelist" || focused?.name !== "panel" || !guildId) return json({ type: 8, data: { choices: [] } });
+    const query = String(focused.value || "").toLowerCase();
+    const panels = await env.DB.prepare("SELECT id, name FROM panels WHERE guild_id = ? AND active = 1 AND script_id IS NOT NULL ORDER BY created_at DESC LIMIT 25").bind(guildId).all();
+    const choices = (panels.results || [])
+      .filter((panel) => !query || String(panel.name || "").toLowerCase().includes(query) || String(panel.id).toLowerCase().includes(query))
+      .slice(0, 25)
+      .map((panel) => ({ name: String(panel.name || "Eternal Auth Panel").slice(0, 100), value: String(panel.id) }));
+    return json({ type: 8, data: { choices } });
+  }
 
   if (interaction.type === 3) {
     return handleDiscordComponent(interaction, env, ctx);
@@ -2876,15 +2934,18 @@ async function handleDiscordInteraction(request, env, ctx) {
     const target = cleanText(opts.user, 64);
     const days = Number(opts.days ?? -1);
     const note = cleanText(opts.note, 300);
+    const panel = await getPanel(env, guildId, cleanText(opts.panel, 128));
+    if (!panel?.script_id) return discordMessage("Select an active panel linked to a script.");
     if (await isBlacklisted(env, guildId, target)) return discordMessage("That user is blacklisted.");
     if (await findLicenseForDiscord(env, guildId, target)) return discordMessage("That user already has an active license.");
 
-    const license = await createLicense(env, { guildId, discordId: target, days, note });
-    ctx.waitUntil(addBuyerRole(env, guild, target));
-    ctx.waitUntil(dmLoader(env, guild, target, license.key, guild.base_url));
-    await audit(env, guildId, "discord.whitelist", userId, target, { days, note });
-    ctx.waitUntil(sendLog(env, guild, `✅ Whitelisted <@${target}>${days > 0 ? ` for ${days} day(s)` : " (lifetime)"}.`));
-    return discordMessage(`✅ Whitelisted <@${target}>. Key: \`${license.key}\``);
+    const license = await createLicense(env, { guildId, discordId: target, panelId: panel.id, days, note });
+    const panelGuild = guildForPanel(guild, panel);
+    ctx.waitUntil(addBuyerRole(env, panelGuild, target));
+    ctx.waitUntil(dmLoader(env, panelGuild, target, license.key, guild.base_url, panel));
+    await audit(env, guildId, "discord.whitelist", userId, target, { days, note, panel_id: panel.id });
+    ctx.waitUntil(sendLog(env, guild, `✅ Whitelisted <@${target}> to panel **${panel.name}**${days > 0 ? ` for ${days} day(s)` : " (lifetime)"}.`));
+    return discordMessage(`✅ Whitelisted <@${target}> to **${panel.name}**. Key: \`${license.key}\``);
   }
 
   if (name === "unwhitelist") {
@@ -3372,7 +3433,16 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
   const valid = await validateLicense(env, license, null, false);
   if (!valid.ok) return discordMessage(valid.error);
 
-  const scripts = await getScriptsForGuild(env, guild.guild_id, true);
+  if (license.panel_id) {
+    const assignedPanel = await getPanel(env, guild.guild_id, license.panel_id);
+    if (!assignedPanel?.script_id) return discordMessage("Your assigned panel is disabled or no longer linked to a script.");
+    if (panel && panel.id !== assignedPanel.id) return discordMessage("Your license is assigned to a different panel.");
+    panel = assignedPanel;
+    selectedScriptId = assignedPanel.script_id;
+  }
+
+  let scripts = await getScriptsForGuild(env, guild.guild_id, true);
+  if (license.panel_id) scripts = scripts.filter((script) => script.id === selectedScriptId);
   if (!scripts.length) return discordMessage("There are no enabled Eternal Auth scripts in this project.");
 
   // A /setpanel loader pins that panel to one specific Eternal Auth script.
@@ -3485,14 +3555,15 @@ async function removeBuyerRole(env, guild, userId) {
   return !!(await discordApi(env, `/guilds/${guild.guild_id}/members/${userId}/roles/${guild.buyer_role_id}`, { method: "DELETE" }));
 }
 
-async function dmLoader(env, guild, userId, key, origin) {
+async function dmLoader(env, guild, userId, key, origin, panel = null) {
   const dm = await discordApi(env, "/users/@me/channels", {
     method: "POST",
     body: JSON.stringify({ recipient_id: userId }),
   });
   if (!dm?.id) return false;
 
-  const scripts = await getScriptsForGuild(env, guild.guild_id, true);
+  let scripts = await getScriptsForGuild(env, guild.guild_id, true);
+  if (panel?.script_id) scripts = scripts.filter((script) => script.id === panel.script_id);
   let content;
   if (scripts.length === 1) {
     const loader = buildLoader(guild.loader_template || defaultLoaderTemplate(), key, guild, scripts[0]);

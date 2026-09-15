@@ -1,4 +1,4 @@
-# Eternal Auth v1.8.8 — Cloudflare deployment + FFA
+# Eternal Auth v1.8.9 — panel-scoped licenses
 
 This full project is based on your latest recovered v1.8.6 package. It has not been deployed or tested against your live Cloudflare account or Roblox executor.
 
@@ -19,7 +19,7 @@ This full project is based on your latest recovered v1.8.6 package. It has not b
 
 1. Extract this ZIP. Check that `wrangler.jsonc` identifies your existing `eternal-auth` Worker and `eternal-auth-db` database. It retains database ID `25c635e7-31ba-4beb-b838-b48e078738f9` from the recovered package. Do not use that ID for a different account.
 2. Double-click `DEPLOY-WINDOWS.cmd`. Sign in to the Cloudflare account that owns the Worker when Wrangler opens your browser.
-3. The script installs dependencies, runs local tests, exports a timestamped database backup, applies the additive v1.8.7 and v1.8.8 migrations, then deploys. It stops on any error. It does not change your plan or rotate existing secrets.
+3. The script installs dependencies, runs local tests, exports a timestamped database backup, applies the additive v1.8.7, v1.8.8, and v1.8.9 migrations, then deploys. It stops on any error. It does not change your plan or rotate existing secrets.
 4. Visit `/api/health`, sign in to the dashboard and check Gateway status. The existing five-minute cron also wakes the bot. Send the bot `help` in a DM and verify the reply and online indicator.
 5. Run `npm run commands` once so Discord registers the new `/ffa` command. Confirm the existing Discord Interactions Endpoint remains `https://eternal-auth.xyzcheatz.workers.dev/discord/interactions`.
 

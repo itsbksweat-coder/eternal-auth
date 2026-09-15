@@ -21,6 +21,7 @@ async function fixture() {
   const keyHash = await api.sha256Hex('valid-key');
   db.prepare("INSERT INTO licenses (id,guild_id,key_hash,discord_id,created_at,updated_at) VALUES ('l','123456789012345678',?,'u',0,0)").run(keyHash);
   db.prepare("INSERT INTO scripts (id,guild_id,loader_id,name,content,version,enabled,ffa_enabled,created_at,updated_at) VALUES ('s','123456789012345678','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Test','SECRET_PROTECTED_CONTENT','1',1,1,0,0)").run();
+  db.prepare("INSERT INTO panels (id,guild_id,name,script_id,active,created_at,updated_at) VALUES ('p','123456789012345678','Main Panel','s',1,0,0)").run();
   return { db, env };
 }
 const request = (params) => new Request('https://auth.test/api/v1/loader?' + new URLSearchParams(params),{headers:{'x-eternal-execute':'1'}});
@@ -103,6 +104,18 @@ test('first-stage source probes return Blacklisted and verified keyed probes per
   assert.equal(await response.text(),'Blacklisted');
   assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'loader_probe');
   assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'security_blacklisted');
+});
+
+test('panel-scoped license cannot load a script attached to another panel', async () => {
+  const {db,env}=await fixture();
+  db.prepare("UPDATE licenses SET panel_id='p' WHERE id='l'").run();
+  db.prepare("INSERT INTO scripts (id,guild_id,loader_id,name,content,version,enabled,ffa_enabled,created_at,updated_at) VALUES ('s2','123456789012345678','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','Other','OTHER_SECRET','1',1,0,0,0)").run();
+  db.prepare("INSERT INTO panels (id,guild_id,name,script_id,active,created_at,updated_at) VALUES ('p2','123456789012345678','Other Panel','s2',1,0,0)").run();
+  let response=await api.handlePublicLoader(new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{authorization:'Bearer valid-key','x-eternal-device':'panel-device','x-eternal-execute':'1'}}),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(response.status,200);
+  response=await api.handlePublicLoader(new Request('https://auth.test/files/v4/loaders/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.lua',{headers:{authorization:'Bearer valid-key','x-eternal-device':'panel-device','x-eternal-execute':'1'}}),env,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',{waitUntil(){}});
+  assert.equal(response.status,403);
+  assert.equal(await response.text(),'Blacklisted');
 });
 
 test('FFA signed reports blacklist only the reporting device', async () => {

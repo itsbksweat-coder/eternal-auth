@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS licenses (
   guild_id TEXT NOT NULL,
   key_hash TEXT NOT NULL UNIQUE,
   discord_id TEXT,
+  panel_id TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   auth_expire INTEGER NOT NULL DEFAULT -1,
   note TEXT,

@@ -6,6 +6,7 @@ let backendState = { last_guild_id: null, active_tab: "gateway", preferences: {}
 let stockCache = [];
 let serverKeyCache = [];
 let scriptCache = [];
+let panelCache = [];
 let selectedScriptId = null;
 
 async function api(path, options = {}) {
@@ -198,12 +199,13 @@ function renderLicenses(rows = []) {
   $("#licenseRows").innerHTML = filtered.length ? filtered.map(r => `
     <tr>
       <td>${esc(r.discord_id || "Unclaimed")}</td>
+      <td>${esc(r.panel_name || "Project-wide")}</td>
       <td><span class="pill ${r.status === "active" ? "" : "bad"}">${esc(r.status)}</span></td>
       <td>${esc(fmtTime(r.auth_expire))}</td>
       <td>${r.hwid_hash ? "Linked" : "Not linked"}</td>
       <td>${esc(r.note || "—")}</td>
       <td><div class="actions"><button class="ghost" data-reset="${esc(r.id)}">Reset HWID</button><button class="danger" data-delete="${esc(r.id)}">Unwhitelist</button></div></td>
-    </tr>`).join("") : `<tr><td colspan="6" class="empty">No matching licenses.</td></tr>`;
+    </tr>`).join("") : `<tr><td colspan="7" class="empty">No matching licenses.</td></tr>`;
   $("#licenseRows").onclick = async (e) => {
     const reset = e.target.dataset.reset;
     const del = e.target.dataset.delete;
@@ -321,6 +323,14 @@ async function deleteScript(id) {
 }
 
 function renderPanels(rows = []) {
+  panelCache = rows;
+  const picker = $("#wlPanel");
+  if (picker) {
+    const current = picker.value;
+    const active = rows.filter((row) => row.active && row.script_id);
+    picker.innerHTML = `<option value="">Select panel</option>` + active.map((row) => `<option value="${esc(row.id)}">${esc(row.name || "Eternal Auth Panel")}</option>`).join("");
+    if (active.some((row) => row.id === current)) picker.value = current;
+  }
   const body = $("#panelRows");
   if (!body) return;
   body.innerHTML = rows.length ? rows.map((r) => `
@@ -408,11 +418,18 @@ $("#whitelistForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
     const days = $("#wlDays").value ? Number($("#wlDays").value) : -1;
-    const data = await api("/api/admin/licenses", { method: "POST", body: JSON.stringify({ guild_id: $("#guildId").value.trim(), discord_id: $("#wlDiscord").value.trim(), days, note: $("#wlNote").value.trim() }) });
+    const data = await api("/api/admin/licenses", { method: "POST", body: JSON.stringify({ guild_id: $("#guildId").value.trim(), discord_id: $("#wlDiscord").value.trim(), panel_id: $("#wlPanel").value, days, note: $("#wlNote").value.trim() }) });
     msg(`Whitelisted. Key: ${data.license.key}`, "success");
     e.target.reset(); await loadProject();
   } catch (err) { msg(err.message, "error"); }
 });
+
+$("#syncDiscordCommands").onclick = async () => {
+  try {
+    const data = await api("/api/admin/discord/sync-commands", { method: "POST", body: "{}" });
+    msg(`Discord commands synced (${data.commands}). The panel option is now available.`, "success");
+  } catch (err) { msg(err.message, "error"); }
+};
 
 $("#compensateForm").addEventListener("submit", async (e) => {
   e.preventDefault();

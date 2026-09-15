@@ -44,6 +44,7 @@ const commands = [
     description: "Whitelist a Discord user",
     options: [
       { name: "user", description: "User to whitelist", type: USER, required: true },
+      { name: "panel", description: "Panel this license can access", type: STRING, required: true, autocomplete: true },
       { name: "days", description: "Days of access; omit for lifetime", type: INTEGER, required: false, min_value: 1 },
     ],
   },

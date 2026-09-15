@@ -199,9 +199,11 @@
               <h3>Whitelist user</h3>
               <form id="whitelistForm" class="stack compact">
                 <input id="wlDiscord" placeholder="Discord user ID" required />
+                <select id="wlPanel" required><option value="">Select panel</option></select>
                 <input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" />
                 <input id="wlNote" placeholder="Note (optional)" />
                 <button class="primary" type="submit">Whitelist</button>
+                <button class="ghost" id="syncDiscordCommands" type="button">Sync Discord panel option</button>
               </form>
             </article>
             <article class="card panel-card">
@@ -221,7 +223,7 @@
               </div>
               <input id="licenseSearch" placeholder="Search Discord ID / note" />
             </div>
-            <div class="table-wrap"><table><thead><tr><th>Discord</th><th>Status</th><th>Expires</th><th>HWID</th><th>Note</th><th></th></tr></thead><tbody id="licenseRows"></tbody></table></div>
+            <div class="table-wrap"><table><thead><tr><th>Discord</th><th>Panel</th><th>Status</th><th>Expires</th><th>HWID</th><th>Note</th><th></th></tr></thead><tbody id="licenseRows"></tbody></table></div>
           </article>
         </section>
 

@@ -7,7 +7,7 @@ let source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
 source = source.replace('import { DurableObject } from "cloudflare:workers";', 'class DurableObject {}');
 for (const file of ['dm-responder.js', 'device-security.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
 source = source.replace('"../public/entry-loader.js"', JSON.stringify(new URL('../public/entry-loader.js', import.meta.url).href));
-source += '\nexport { handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource };';
+source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource };';
 const api = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 async function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -119,6 +119,17 @@ test('legacy loader_probe false-positive HWID bans self-recover but real securit
   db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'clipboard','l',0)").run(hash);
   response=await api.handleProtectedLoader(request({key:'valid-key',device_id:'legacy-device',script_id:'s'}),env);
   assert.equal(response.status,403);
+});
+
+test('admin can remove an FFA HWID blacklist by pasting the raw device ID', async () => {
+  const {db,env}=await fixture();
+  const hash=await api.hashDevice(env,'my-raw-hwid');
+  db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'http_spy','ffa:s',0)").run(hash);
+  const request=new Request('https://auth.test/api/admin/hwid-blacklists',{method:'DELETE',body:JSON.stringify({guild_id:'123456789012345678',device_id:'my-raw-hwid'})});
+  const response=await api.handleAdminApi(request,env,new URL(request.url),{waitUntil(){}});
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).removed,true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 });
 
 test('panel-scoped license cannot load a script attached to another panel', async () => {

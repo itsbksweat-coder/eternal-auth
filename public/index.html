@@ -269,12 +269,24 @@
                 <button class="danger" type="submit">Blacklist</button>
               </form>
             </article>
+            <article class="card panel-card">
+              <span class="eyebrow">DEVICE RECOVERY</span>
+              <h3>Unblacklist raw HWID</h3>
+              <form id="hwidUnblacklistForm" class="stack compact">
+                <input id="unbanHwid" placeholder="Paste your raw HWID" required />
+                <button class="ghost" type="submit">Clear HWID ban</button>
+              </form>
+            </article>
             <article class="card panel-card accent-card">
               <span class="eyebrow">INFO</span>
               <h3>Temporary bans</h3>
               <p class="muted">Temporary blacklists expire automatically and user access is restored when the blacklist reaches its end date.</p>
             </article>
           </div>
+          <article class="card table-card">
+            <div class="section-head"><div><span class="eyebrow">DEVICES</span><h3>HWID blacklists</h3></div></div>
+            <div class="table-wrap"><table><thead><tr><th>HWID hash</th><th>Reason</th><th>Created</th><th></th></tr></thead><tbody id="hwidBlacklistRows"></tbody></table></div>
+          </article>
           <article class="card table-card">
             <div class="section-head">
               <div>

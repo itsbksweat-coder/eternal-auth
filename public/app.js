@@ -95,11 +95,12 @@ async function loadProject() {
   try {
     const gid = guildQuery();
     msg("Loading Eternal Auth project…");
-    const [stats, licenses, stock, blacklists, config, scripts, panels, logs] = await Promise.all([
+    const [stats, licenses, stock, blacklists, hwidBlacklists, config, scripts, panels, logs] = await Promise.all([
       api(`/api/admin/stats?guild_id=${gid}`),
       api(`/api/admin/licenses?guild_id=${gid}`),
       api(`/api/admin/stock-keys?guild_id=${gid}`),
       api(`/api/admin/blacklists?guild_id=${gid}`),
+      api(`/api/admin/hwid-blacklists?guild_id=${gid}`),
       api(`/api/admin/config?guild_id=${gid}`),
       api(`/api/admin/scripts?guild_id=${gid}`),
       api(`/api/admin/panels?guild_id=${gid}`),
@@ -109,6 +110,7 @@ async function loadProject() {
     renderLicenses(licenses.licenses);
     renderStock(stock.keys);
     renderBlacklists(blacklists.blacklists);
+    renderHwidBlacklists(hwidBlacklists.blacklists);
     renderConfig(config);
     renderScripts(scripts.scripts || []);
     renderPanels(panels.panels || []);
@@ -232,6 +234,21 @@ function renderBlacklists(rows = []) {
     if (!id) return;
     try { await api(`/api/admin/blacklists/${guildQuery()}/${encodeURIComponent(id)}`, { method: "DELETE" }); await loadProject(); }
     catch (err) { msg(err.message, "error"); }
+  };
+}
+
+function renderHwidBlacklists(rows = []) {
+  const body = $("#hwidBlacklistRows");
+  if (!body) return;
+  body.innerHTML = rows.length ? rows.map((row) => `<tr><td><code>${esc(String(row.hwid_hash || "").slice(0,16))}…</code></td><td>${esc(row.reason || "—")}</td><td>${esc(fmtTime(row.created_at))}</td><td><button class="ghost" data-remove-hwid="${esc(row.hwid_hash)}">Remove</button></td></tr>`).join("") : `<tr><td colspan="4" class="empty">No blacklisted HWIDs.</td></tr>`;
+  body.onclick = async (event) => {
+    const hash = event.target.dataset.removeHwid;
+    if (!hash) return;
+    try {
+      await api("/api/admin/hwid-blacklists", { method: "DELETE", body: JSON.stringify({ guild_id: $("#guildId").value.trim(), hwid_hash: hash }) });
+      msg("HWID blacklist removed.", "success");
+      await loadProject();
+    } catch (err) { msg(err.message, "error"); }
   };
 }
 
@@ -455,6 +472,19 @@ $("#blacklistForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   try { await api("/api/admin/blacklists", { method: "POST", body: JSON.stringify({ guild_id: $("#guildId").value.trim(), discord_id: $("#blDiscord").value.trim(), reason: $("#blReason").value.trim(), days: $("#blDays").value ? Number($("#blDays").value) : -1 }) }); e.target.reset(); msg("User blacklisted.", "success"); await loadProject(); }
   catch (err) { msg(err.message, "error"); }
+});
+
+$("#hwidUnblacklistForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/admin/hwid-blacklists", {
+      method: "DELETE",
+      body: JSON.stringify({ guild_id: $("#guildId").value.trim(), device_id: $("#unbanHwid").value.trim() }),
+    });
+    e.target.reset();
+    msg("HWID blacklist removed.", "success");
+    await loadProject();
+  } catch (err) { msg(err.message, "error"); }
 });
 
 

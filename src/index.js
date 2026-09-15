@@ -2356,20 +2356,28 @@ async function handleAdminApi(request, env, url, ctx) {
   }
 
   if (url.pathname === "/api/admin/hwid-blacklists" && request.method === "GET") {
-    const result = await env.DB.prepare("SELECT * FROM hwid_blacklists ORDER BY created_at DESC LIMIT 250").all();
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    const result = guildId
+      ? await env.DB.prepare("SELECT * FROM hwid_blacklists WHERE guild_id = ? ORDER BY created_at DESC LIMIT 250").bind(guildId).all()
+      : await env.DB.prepare("SELECT * FROM hwid_blacklists ORDER BY created_at DESC LIMIT 250").all();
     return json({ ok: true, blacklists: result.results || [] });
   }
   if (url.pathname === "/api/admin/hwid-blacklists" && request.method === "DELETE") {
     const body = await readJson(request);
-    const guildId = cleanText(body?.guild_id, 32);
-    const hash = cleanText(body?.hwid_hash, 128);
-    if (!guildId || !/^[a-f0-9]{64}$/.test(hash)) return json({ ok: false, error: "Guild and HWID hash required" }, 400);
+    const guildId = cleanText(body?.guild_id, 64);
+    const rawDeviceId = cleanText(body?.device_id, 512);
+    let hash = cleanText(body?.hwid_hash, 128)?.toLowerCase() || null;
+    if (!guildId) return json({ ok: false, error: "Discord server ID is required" }, 400);
+    if (rawDeviceId) hash = await hashDevice(env, rawDeviceId);
+    if (!hash || !/^[a-f0-9]{64}$/.test(hash)) return json({ ok: false, error: "Enter the raw HWID or select a stored HWID ban" }, 400);
+    const existing = await env.DB.prepare("SELECT reason, license_id FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? LIMIT 1").bind(guildId, hash).first();
+    if (!existing) return json({ ok: false, error: "That HWID is not blacklisted in this project" }, 404);
     await env.DB.batch([
       env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND status = 'security_blacklisted' AND (hwid_hash = ? OR id IN (SELECT license_id FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ?))").bind(now(), guildId, hash, guildId, hash),
       env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ?").bind(guildId, hash),
     ]);
-    await audit(env, guildId, "admin.unblacklist_hwid", "dashboard", hash, {});
-    return json({ ok: true });
+    await audit(env, guildId, "admin.unblacklist_hwid", "dashboard", hash, { reason: existing.reason || null });
+    return json({ ok: true, removed: true });
   }
 
   if (url.pathname === "/api/admin/blacklists" && request.method === "GET") {

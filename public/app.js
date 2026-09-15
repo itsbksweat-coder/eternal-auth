@@ -204,15 +204,17 @@ function renderLicenses(rows = []) {
       <td>${esc(fmtTime(r.auth_expire))}</td>
       <td>${r.hwid_hash ? "Linked" : "Not linked"}</td>
       <td>${esc(r.note || "—")}</td>
-      <td><div class="actions"><button class="ghost" data-reset="${esc(r.id)}">Reset HWID</button><button class="danger" data-delete="${esc(r.id)}">Unwhitelist</button></div></td>
+      <td><div class="actions"><button class="ghost" data-reset="${esc(r.id)}">Reset HWID</button>${r.status === "security_blacklisted" && r.hwid_hash ? `<button class="ghost" data-security-hash="${esc(r.hwid_hash)}">Clear HWID Ban</button>` : ""}<button class="danger" data-delete="${esc(r.id)}">Unwhitelist</button></div></td>
     </tr>`).join("") : `<tr><td colspan="7" class="empty">No matching licenses.</td></tr>`;
   $("#licenseRows").onclick = async (e) => {
     const reset = e.target.dataset.reset;
     const del = e.target.dataset.delete;
+    const securityHash = e.target.dataset.securityHash;
     try {
       if (reset) await api(`/api/admin/licenses/${encodeURIComponent(reset)}/reset-hwid`, { method: "POST", body: "{}" });
+      if (securityHash) await api("/api/admin/hwid-blacklists", { method: "DELETE", body: JSON.stringify({ guild_id: $("#guildId").value.trim(), hwid_hash: securityHash }) });
       if (del && confirm("Remove this license?")) await api(`/api/admin/licenses/${encodeURIComponent(del)}`, { method: "DELETE" });
-      if (reset || del) await loadProject();
+      if (reset || del || securityHash) await loadProject();
     } catch (err) { msg(err.message, "error"); }
   };
   window.__licenseRows = rows;

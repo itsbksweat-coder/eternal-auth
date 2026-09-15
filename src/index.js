@@ -934,7 +934,7 @@ async function isBlacklisted(env, guildId, discordId) {
   return row;
 }
 
-async function validateLicense(env, license, deviceId = null, bindDevice = true) {
+async function validateLicense(env, license, deviceId = null, shouldBindDevice = true) {
   if (!license) return { ok: false, error: "Invalid key" };
 
   if (license.status === "security_blacklisted" || await deviceBlocked(env, license.guild_id, license.hwid_hash, deviceId ? await hashDevice(env, deviceId) : null)) return { ok: false, error: "Blacklisted" };
@@ -957,7 +957,7 @@ async function validateLicense(env, license, deviceId = null, bindDevice = true)
 
   if (deviceId) {
     const deviceHash = await hashDevice(env, deviceId);
-    if (!license.hwid_hash && bindDevice) {
+    if (!license.hwid_hash && shouldBindDevice) {
       if (!await bindDevice(env, license, deviceHash, now())) return { ok: false, error: "Device mismatch. Reset HWID first." };
       license.hwid_hash = deviceHash;
     } else if (license.hwid_hash && license.hwid_hash !== deviceHash) {
@@ -1202,6 +1202,10 @@ function isBrowserNavigation(request) {
   return mode === "navigate" || dest === "document" || fetchUser === "?1";
 }
 
+function hasLoaderExecutionIntent(request) {
+  return request.headers.get("x-eternal-execute") === "1" && !isBrowserNavigation(request);
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -1299,6 +1303,15 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
   if (!guild || !script || !guild.active || !script.enabled || !script.content || license.guild_id !== guild.guild_id) return deniedSource();
   const valid = await validateLicense(env, license, credentials.deviceId, true);
   if (!valid.ok) return deniedSource();
+  if (!hasLoaderExecutionIntent(request)) {
+    const hash = await hashDevice(env, credentials.deviceId);
+    const timestamp = now();
+    await env.DB.batch([
+      env.DB.prepare("INSERT OR IGNORE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'loader_probe', ?, ?)").bind(guild.guild_id, hash, license.id, timestamp),
+      env.DB.prepare("UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)").bind(timestamp, guild.guild_id, hash, license.id),
+    ]);
+    return deniedSource();
+  }
   return new Response(buildBootstrapSource(new URL(request.url).origin, script.id), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "Authorization, X-Eternal-Device", "x-content-type-options": "nosniff" },
@@ -1316,6 +1329,10 @@ async function handleFfaPublicLoader(request, env, loaderId) {
   if (!guild?.active) return deniedSource();
   const deviceHash = await hashDevice(env, deviceId);
   if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
+  // FFA requests have no account secret. Require the execution-only launcher
+  // marker, but do not trust a caller-supplied raw HWID enough to blacklist it
+  // until the signed in-runtime report proof is available.
+  if (!hasLoaderExecutionIntent(request)) return deniedSource();
   const reportToken = await createFfaReportToken(env, guild.guild_id, script.id, deviceHash);
   return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true, reportToken), {
     status: 200,

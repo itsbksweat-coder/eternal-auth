@@ -1378,7 +1378,7 @@ if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to a
   const protectedUrl = ffa
     ? `local u="${apiUrl}&device_id="..H:UrlEncode(tostring(d))`
     : `local u="${apiUrl}&key="..H:UrlEncode(tostring(key)).."&device_id="..H:UrlEncode(tostring(d))`;
-  return `-- Eternal Auth fast bootstrap + seven-layer source leak guard
+  return `-- Eternal Auth fast bootstrap + eight-layer source leak guard
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
 local lp=P.LocalPlayer

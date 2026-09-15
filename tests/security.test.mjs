@@ -79,6 +79,9 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
   assert.match(guiLayer,/TextButton/);
   assert.match(guiLayer,/GetPropertyChangedSignal\("Text"\)/);
   assert.match(guiLayer,/__ea_gui_fragments/);
+  assert.match(guiLayer,/__ea_scrub_gui=function\(\)/);
+  assert.match(guiLayer,/obj\.Text="Blacklisted"/);
+  assert.match(lua,/if type\(__ea_scrub_gui\)=="function" then pcall\(__ea_scrub_gui\) end/);
   const clipboardLayer=lua.slice(lua.indexOf('-- Layer 3:'),lua.indexOf('-- Layer 4:'));
   assert.match(clipboardLayer,/copyclipboard/);
   assert.match(clipboardLayer,/clipboardset/);

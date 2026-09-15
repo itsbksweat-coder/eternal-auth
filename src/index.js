@@ -3558,8 +3558,10 @@ function buildLoader(template, key, guild, script = null) {
   const loaderUrl = script
     ? (loaderUrlForScript(guild, script) || `${String(guild?.base_url || "https://YOUR-WORKER.workers.dev").replace(/\/$/, "")}/files/v4/loaders/LOADER_ID.lua`)
     : (loaderUrlForGuild(guild) || `${String(guild?.base_url || "https://YOUR-WORKER.workers.dev").replace(/\/$/, "")}/files/v4/loaders/LOADER_ID.lua`);
-  // Stored templates are retained in D1; generated launchers now use the required credential handshake.
-  return authenticatedLauncher(loaderUrl, key);
+  // Keep the user-facing result short. The public loader URL returns the
+  // credential-handshake wrapper, so protected headers and HWID checks remain
+  // server-enforced without displaying that wrapper in Discord.
+  return `script_key=${JSON.stringify(key)}\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
 }
 
 async function discordApi(env, path, options = {}) {

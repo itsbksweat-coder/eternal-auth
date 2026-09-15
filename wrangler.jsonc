@@ -1,0 +1,55 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "eternal-auth",
+  "main": "./src/index.js",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "eternal-auth-db",
+      "database_id": "25c635e7-31ba-4beb-b838-b48e078738f9"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GATEWAY",
+        "class_name": "EternalGateway"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1.3",
+      "new_sqlite_classes": [
+        "EternalGateway"
+      ]
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
+  "vars": {
+    "HWID_RESET_COOLDOWN_MINUTES": "5"
+  },
+  "secrets": {
+    "required": [
+      "DISCORD_PUBLIC_KEY",
+      "DISCORD_BOT_TOKEN",
+      "DISCORD_APPLICATION_ID",
+      "LICENSE_KEY_SECRET",
+      "HWID_PEPPER",
+      "CONFIG_SECRET"
+    ]
+  }
+}

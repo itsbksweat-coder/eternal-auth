@@ -1,0 +1,3401 @@
+import { authenticatedLauncher, ffaLauncher } from "../public/entry-loader.js";
+import { DurableObject } from "cloudflare:workers";
+import { DmResponder } from "./dm-responder.js";
+import { deviceBlocked, bindDevice, hwidCooldownSeconds } from "./device-security.js";
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+const JSON_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-store",
+};
+
+const EPHEMERAL = 1 << 6;
+const ADMINISTRATOR = 1n << 3n;
+
+// Hot-path caches. Cloudflare isolates are reused between requests, so these
+// avoid repeated D1 reads during rapid Discord interaction flows. Every cache
+// entry has a short TTL and all paths still fall back to D1 when an isolate is
+// cold or a request lands on a different isolate.
+const HOT_CACHE_TTL_MS = 30_000;
+const guildHotCache = new Map();
+const scriptHotCache = new Map();
+const draftHotCache = new Map();
+const panelHotCache = new Map();
+
+function cacheGet(map, key) {
+  const hit = map.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) { map.delete(key); return null; }
+  return hit.value;
+}
+function cachePut(map, key, value, ttl = HOT_CACHE_TTL_MS) {
+  map.set(key, { value, expiresAt: Date.now() + ttl });
+  return value;
+}
+function cacheDelete(map, key) { map.delete(key); }
+
+// Eternal Auth v1.4 Free Gateway
+//
+// This single SQLite-backed Durable Object opens one outbound WebSocket to
+// Discord's Gateway using non-privileged GUILDS and DIRECT_MESSAGES intents.
+// It maintains online presence and replies to DMs; slash commands/buttons continue to
+// be handled by /discord/interactions in the Worker below.
+//
+// A single continuously-active 128 MB Durable Object consumes about 11,060
+// GB-s/day, which is below Cloudflare's current 13,000 GB-s/day Free allowance.
+export class EternalGateway extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.ctx = ctx;
+    this.env = env;
+    this.ws = null;
+    this.connectPromise = null;
+    this.reconnectTimer = null;
+    this.heartbeatTimer = null;
+    this.firstHeartbeatTimer = null;
+    this.sequence = null;
+    this.sessionId = null;
+    this.resumeGatewayUrl = null;
+    this.awaitingHeartbeatAck = false;
+    this.ready = false;
+    this.userId = null;
+    this.userTag = null;
+    this.guildIds = new Set();
+    this.startedAt = Date.now();
+    this.connectedAt = null;
+    this.readyAt = null;
+    this.lastHeartbeatAt = null;
+    this.lastHeartbeatAckAt = null;
+    this.lastError = null;
+    this.reconnectAttempts = 0;
+    this.fatal = false;
+    this.dmResponder = new DmResponder(env);
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/wake" || url.pathname === "/status") {
+      if (!this.fatal && !this.isSocketOpen()) {
+        try {
+          await this.ensureConnected();
+        } catch (error) {
+          this.lastError = String(error?.message || error);
+        }
+      }
+      return new Response(JSON.stringify(this.status()), {
+        status: 200,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    if (url.pathname === "/reconnect" && request.method === "POST") {
+      this.fatal = false;
+      this.lastError = null;
+      this.disconnectSocket(4000, "Manual Eternal Auth reconnect");
+      await this.ensureConnected(true);
+      return new Response(JSON.stringify(this.status()), {
+        status: 200,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    return new Response("Not found", { status: 404 });
+  }
+
+  status() {
+    return {
+      ok: true,
+      mode: "durable-object-free",
+      gateway_ready: this.ready,
+      dm_replies_enabled: true,
+      dm_replies_sent: this.dmResponder.sent,
+      dm_last_error: this.dmResponder.lastError,
+      discord_status: this.ready ? "online" : (this.connectPromise || this.isSocketOpen() ? "connecting" : "offline"),
+      user_id: this.userId,
+      user_tag: this.userTag,
+      guilds: this.guildIds.size,
+      ws_status: this.ws?.readyState ?? null,
+      started_at: new Date(this.startedAt).toISOString(),
+      connected_at: this.connectedAt ? new Date(this.connectedAt).toISOString() : null,
+      ready_at: this.readyAt ? new Date(this.readyAt).toISOString() : null,
+      uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
+      last_heartbeat_at: this.lastHeartbeatAt ? new Date(this.lastHeartbeatAt).toISOString() : null,
+      last_heartbeat_ack_at: this.lastHeartbeatAckAt ? new Date(this.lastHeartbeatAckAt).toISOString() : null,
+      reconnect_attempts: this.reconnectAttempts,
+      fatal: this.fatal,
+      last_error: this.lastError,
+    };
+  }
+
+  isSocketOpen() {
+    return !!this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1);
+  }
+
+  async ensureConnected(force = false) {
+    if (!this.env.DISCORD_BOT_TOKEN) {
+      this.fatal = true;
+      throw new Error("DISCORD_BOT_TOKEN is not configured");
+    }
+
+    if (!force && this.isSocketOpen()) return;
+    if (this.connectPromise) return this.connectPromise;
+
+    this.connectPromise = this.openGateway()
+      .catch((error) => {
+        this.lastError = String(error?.message || error);
+        throw error;
+      })
+      .finally(() => {
+        this.connectPromise = null;
+      });
+
+    return this.connectPromise;
+  }
+
+  async openGateway() {
+    this.clearReconnectTimer();
+    this.clearHeartbeat();
+    this.ready = false;
+
+    const base = this.sessionId && this.resumeGatewayUrl
+      ? this.resumeGatewayUrl
+      : "https://gateway.discord.gg";
+    const gatewayUrl = `${String(base).replace(/\/$/, "")}/?v=10&encoding=json`;
+
+    const response = await fetch(gatewayUrl, {
+      headers: { Upgrade: "websocket" },
+    });
+
+    const ws = response.webSocket;
+    if (!ws) {
+      throw new Error(`Discord Gateway refused WebSocket upgrade (HTTP ${response.status})`);
+    }
+
+    ws.accept();
+    this.ws = ws;
+    this.connectedAt = Date.now();
+    this.lastError = null;
+
+    ws.addEventListener("message", (event) => {
+      if (this.ws !== ws) return;
+      try {
+        this.handleGatewayMessage(event.data);
+      } catch (error) {
+        this.lastError = `Gateway message error: ${String(error?.message || error)}`;
+        console.error(this.lastError);
+      }
+    });
+
+    ws.addEventListener("close", (event) => {
+      if (this.ws !== ws) return;
+      this.handleGatewayClose(event.code, event.reason || "");
+    });
+
+    ws.addEventListener("error", () => {
+      if (this.ws !== ws) return;
+      this.lastError = "Discord Gateway WebSocket error";
+    });
+  }
+
+  handleGatewayMessage(raw) {
+    const text = typeof raw === "string" ? raw : dec.decode(raw);
+    const payload = JSON.parse(text);
+
+    if (payload.s != null) this.sequence = payload.s;
+
+    switch (payload.op) {
+      case 0:
+        this.handleDispatch(payload.t, payload.d || {});
+        break;
+
+      case 1:
+        // Discord can request an immediate heartbeat.
+        this.sendGateway({ op: 1, d: this.sequence });
+        this.awaitingHeartbeatAck = true;
+        this.lastHeartbeatAt = Date.now();
+        break;
+
+      case 7:
+        this.lastError = "Discord requested a reconnect";
+        this.reconnect(false);
+        break;
+
+      case 9: {
+        const canResume = payload.d === true;
+        if (!canResume) this.clearSession();
+        this.lastError = canResume ? "Discord invalidated the session; resuming" : "Discord invalidated the session; identifying again";
+        this.reconnect(false, 2500 + Math.floor(Math.random() * 2500));
+        break;
+      }
+
+      case 10:
+        this.startHeartbeat(Number(payload.d?.heartbeat_interval || 45000));
+        if (this.sessionId && this.sequence != null) this.sendResume();
+        else this.sendIdentify();
+        break;
+
+      case 11:
+        this.awaitingHeartbeatAck = false;
+        this.lastHeartbeatAckAt = Date.now();
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  handleDispatch(type, data) {
+    if (type === "MESSAGE_CREATE") {
+      this.ctx.waitUntil(this.dmResponder.handle(data));
+      return;
+    }
+    if (type === "READY") {
+      this.sessionId = data.session_id || null;
+      this.resumeGatewayUrl = data.resume_gateway_url || null;
+      this.userId = data.user?.id || null;
+      const username = data.user?.username || null;
+      const discriminator = data.user?.discriminator;
+      this.userTag = username
+        ? (discriminator && discriminator !== "0" ? `${username}#${discriminator}` : username)
+        : null;
+      this.guildIds = new Set((data.guilds || []).map((g) => g.id).filter(Boolean));
+      this.ready = true;
+      this.readyAt = Date.now();
+      this.reconnectAttempts = 0;
+      this.lastError = null;
+      console.log(`Eternal Auth Free Gateway READY as ${this.userTag || this.userId} in ${this.guildIds.size} guild(s).`);
+      return;
+    }
+
+    if (type === "RESUMED") {
+      this.ready = true;
+      this.readyAt = Date.now();
+      this.reconnectAttempts = 0;
+      this.lastError = null;
+      console.log("Eternal Auth Free Gateway session resumed.");
+      return;
+    }
+
+    if (type === "GUILD_CREATE" && data.id) {
+      this.guildIds.add(data.id);
+      return;
+    }
+
+    if (type === "GUILD_DELETE" && data.id) {
+      this.guildIds.delete(data.id);
+    }
+  }
+
+  sendIdentify() {
+    this.sendGateway({
+      op: 2,
+      d: {
+        token: this.env.DISCORD_BOT_TOKEN,
+        intents: 1 | (1 << 12),
+        properties: {
+          os: "linux",
+          browser: "Eternal Auth",
+          device: "Eternal Auth",
+        },
+        presence: {
+          since: null,
+          activities: [{ name: "Eternal Auth", type: 3 }],
+          status: "online",
+          afk: false,
+        },
+      },
+    });
+  }
+
+  sendResume() {
+    this.sendGateway({
+      op: 6,
+      d: {
+        token: this.env.DISCORD_BOT_TOKEN,
+        session_id: this.sessionId,
+        seq: this.sequence,
+      },
+    });
+  }
+
+  sendGateway(payload) {
+    if (!this.ws || this.ws.readyState !== 1) return false;
+    this.ws.send(JSON.stringify(payload));
+    return true;
+  }
+
+  startHeartbeat(intervalMs) {
+    this.clearHeartbeat();
+    const interval = Math.max(5000, intervalMs || 45000);
+    const jitter = Math.floor(Math.random() * interval);
+
+    this.firstHeartbeatTimer = setTimeout(() => {
+      this.firstHeartbeatTimer = null;
+      this.sendHeartbeat();
+      this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), interval);
+    }, jitter);
+  }
+
+  sendHeartbeat() {
+    if (!this.ws || this.ws.readyState !== 1) return;
+
+    if (this.awaitingHeartbeatAck) {
+      this.lastError = "Discord heartbeat ACK was missed; reconnecting";
+      this.reconnect(false);
+      return;
+    }
+
+    this.awaitingHeartbeatAck = true;
+    this.lastHeartbeatAt = Date.now();
+    this.sendGateway({ op: 1, d: this.sequence });
+  }
+
+  handleGatewayClose(code, reason) {
+    this.clearHeartbeat();
+    this.ws = null;
+    this.ready = false;
+    this.awaitingHeartbeatAck = false;
+    this.lastError = `Discord Gateway closed (${code || 1006})${reason ? `: ${reason}` : ""}`;
+
+    const fatalCodes = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
+    if (fatalCodes.has(code)) {
+      this.fatal = true;
+      console.error(`Eternal Auth Gateway stopped reconnecting after fatal close ${code}.`);
+      return;
+    }
+
+    if (code === 4007 || code === 4009) this.clearSession();
+    this.scheduleReconnect();
+  }
+
+  reconnect(clearSession = false, delayMs = null) {
+    if (clearSession) this.clearSession();
+    this.clearHeartbeat();
+    const old = this.ws;
+    this.ws = null;
+    this.ready = false;
+    try {
+      if (old && (old.readyState === 0 || old.readyState === 1)) old.close(4000, "Eternal Auth reconnect");
+    } catch {}
+    this.scheduleReconnect(delayMs);
+  }
+
+  scheduleReconnect(delayMs = null) {
+    if (this.fatal || this.reconnectTimer) return;
+    this.reconnectAttempts += 1;
+    const backoff = delayMs ?? Math.min(60000, 5000 * Math.max(1, this.reconnectAttempts));
+    const jitter = Math.floor(Math.random() * 1500);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.ensureConnected().catch((error) => {
+        this.lastError = String(error?.message || error);
+        this.scheduleReconnect();
+      });
+    }, backoff + jitter);
+  }
+
+  disconnectSocket(code = 1000, reason = "Closing") {
+    this.clearHeartbeat();
+    this.clearReconnectTimer();
+    const old = this.ws;
+    this.ws = null;
+    this.ready = false;
+    try {
+      if (old && (old.readyState === 0 || old.readyState === 1)) old.close(code, reason);
+    } catch {}
+  }
+
+  clearSession() {
+    this.sessionId = null;
+    this.resumeGatewayUrl = null;
+    this.sequence = null;
+  }
+
+  clearHeartbeat() {
+    if (this.firstHeartbeatTimer) clearTimeout(this.firstHeartbeatTimer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.firstHeartbeatTimer = null;
+    this.heartbeatTimer = null;
+    this.awaitingHeartbeatAck = false;
+  }
+
+  clearReconnectTimer() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+}
+
+function gatewayInstance(env) {
+  const id = env.GATEWAY.idFromName("eternal-auth-primary-gateway");
+  return env.GATEWAY.get(id);
+}
+
+async function ensureGatewayPresence(env) {
+  const gateway = gatewayInstance(env);
+  const response = await gateway.fetch("https://gateway.internal/wake", { method: "POST" });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.error || `Gateway status HTTP ${response.status}`);
+  }
+  try {
+    await env.DB.prepare(
+      `INSERT INTO runtime_state (key, value_json, updated_at) VALUES ('gateway', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`
+    ).bind(JSON.stringify(data), now()).run();
+  } catch (error) {
+    console.warn("Could not persist Gateway snapshot:", error);
+  }
+  return data;
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      const url = new URL(request.url);
+
+      if (request.method === "OPTIONS" && url.pathname.startsWith("/api/v1/")) {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "access-control-allow-origin": "*",
+            "access-control-allow-methods": "GET,POST,OPTIONS",
+            "access-control-allow-headers": "content-type,authorization",
+            "access-control-max-age": "86400",
+          },
+        });
+      }
+
+      if (url.pathname === "/discord/interactions" && request.method === "POST") {
+        return handleDiscordInteraction(request, env, ctx);
+      }
+
+      if (url.pathname === "/api/v1/security/report" && request.method === "POST") {
+        return handleSecurityReport(request, env);
+      }
+
+      if (url.pathname === "/api/v1/verify" && request.method === "POST") {
+        return handleVerify(request, env);
+      }
+
+      if (url.pathname === "/api/v1/bootstrap" && request.method === "GET") {
+        const id = url.searchParams.get("loader_id") || "";
+        if (!/^[a-f0-9]{32}$/i.test(id)) return deniedSource();
+        return handlePublicLoader(request, env, id.toLowerCase(), ctx);
+      }
+
+      const publicLoaderMatch = url.pathname.match(/^\/files\/v4\/loaders\/([a-f0-9]{32})\.lua$/i);
+      if (publicLoaderMatch && request.method === "GET") {
+        return handlePublicLoader(request, env, publicLoaderMatch[1].toLowerCase(), ctx);
+      }
+
+      const ffaLoaderMatch = url.pathname.match(/^\/files\/v4\/ffa\/([a-f0-9]{32})\.lua$/i);
+      if (ffaLoaderMatch && request.method === "GET") {
+        return handleFfaPublicLoader(request, env, ffaLoaderMatch[1].toLowerCase());
+      }
+
+      if (url.pathname === "/api/v1/loader" && request.method === "GET") {
+        return handleProtectedLoader(request, env, ctx);
+      }
+
+      if (url.pathname === "/api/v1/ffa-loader" && request.method === "GET") {
+        return handleFfaProtectedLoader(request, env);
+      }
+
+      if (url.pathname === "/api/admin/login" && request.method === "POST") {
+        await ensureBackendPersistenceSchema(env);
+        return handleAdminLogin(request, env);
+      }
+
+      if (url.pathname === "/api/admin/logout" && request.method === "POST") {
+        await ensureBackendPersistenceSchema(env);
+        return handleAdminLogout(request, env);
+      }
+
+      if (url.pathname.startsWith("/api/admin/")) {
+        await ensureBackendPersistenceSchema(env);
+        const session = await verifyAdminSession(request, env);
+        if (!session) return json({ ok: false, error: "Unauthorized" }, 401);
+        return handleAdminApi(request, env, url, ctx);
+      }
+
+      if (url.pathname === "/api/health" && request.method === "GET") {
+        try {
+          await ensureBackendPersistenceSchema(env);
+          await env.DB.prepare("SELECT 1 AS ok").first();
+          return json({ ok: true, service: "Eternal Auth", backend: "ready" });
+        } catch (error) {
+          console.error("Health check failed:", error);
+          return json({ ok: false, error: "Backend initialization failed" }, 503);
+        }
+      }
+
+      const assetResponse = await env.ASSETS.fetch(request);
+      return withSecurityHeaders(assetResponse);
+    } catch (error) {
+      console.error(error);
+      return json({ ok: false, error: "Internal server error" }, 500);
+    }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(
+      ensureGatewayPresence(env).catch((error) => {
+        console.error("Gateway keepalive failed:", error);
+      }),
+    );
+  },
+};
+
+function json(body, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+  });
+}
+
+function publicJson(body, status = 200) {
+  return json(body, status, {
+    "access-control-allow-origin": "*",
+  });
+}
+
+function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers);
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  headers.set(
+    "content-security-policy",
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+function now() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function cleanText(value, max = 1000) {
+  if (value == null) return null;
+  return String(value).trim().slice(0, max);
+}
+
+const SCRIPT_UPLOAD_EXTENSIONS = new Set([
+  "txt", "lua", "luau", "md", "cfg", "ini", "json", "js", "ts", "xml", "yaml", "yml", "py", "rb", "sh", "ps1", "bat", "cmd", "toml", "conf", "log"
+]);
+
+function cleanScriptUploadFileName(value) {
+  const name = cleanText(value, 255);
+  if (!name || !name.includes(".")) return null;
+  const ext = name.split(".").pop().toLowerCase();
+  return SCRIPT_UPLOAD_EXTENSIONS.has(ext) ? name : null;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex) {
+  if (!hex || hex.length % 2 !== 0) throw new Error("Invalid hex");
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function base64UrlToBytes(value) {
+  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode(value));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function hmacBytes(secret, value) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"]
+  );
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(value)));
+}
+
+async function safeEqualText(a, b) {
+  const aHash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(String(a))));
+  const bHash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(String(b))));
+  if (typeof crypto.subtle.timingSafeEqual === "function") {
+    return crypto.subtle.timingSafeEqual(aHash, bHash);
+  }
+  let diff = 0;
+  for (let i = 0; i < aHash.length; i++) diff |= aHash[i] ^ bHash[i];
+  return diff === 0;
+}
+
+async function configCryptoKey(env) {
+  if (!env.CONFIG_SECRET) throw new Error("CONFIG_SECRET is not configured");
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode(env.CONFIG_SECRET));
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+async function encryptConfigSecret(env, value) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await configCryptoKey(env);
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(value)));
+  return `${bytesToBase64Url(iv)}.${bytesToBase64Url(ciphertext)}`;
+}
+
+async function decryptConfigSecret(env, stored) {
+  const [ivText, cipherText] = String(stored || "").split(".");
+  if (!ivText || !cipherText) throw new Error("Invalid encrypted config");
+  const key = await configCryptoKey(env);
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64UrlToBytes(ivText) },
+    key,
+    base64UrlToBytes(cipherText)
+  );
+  return dec.decode(plain);
+}
+
+async function deriveLicenseKey(env, licenseId) {
+  const bytes = await hmacBytes(env.LICENSE_KEY_SECRET, `license:${licenseId}`);
+  return `EA-${bytesToBase64Url(bytes).slice(0, 40)}`;
+}
+
+async function hashDevice(env, deviceId) {
+  const bytes = await hmacBytes(env.HWID_PEPPER, `device:${deviceId}`);
+  return bytesToHex(bytes);
+}
+
+function firstEightBytesToBigInt(bytes) {
+  let out = 0n;
+  for (let i = 0; i < 8; i++) out = (out << 8n) | BigInt(bytes[i] || 0);
+  return out;
+}
+
+async function loaderMask(env) {
+  const bytes = await hmacBytes(env.CONFIG_SECRET, "eternal-auth:loader-mask");
+  return firstEightBytesToBigInt(bytes);
+}
+
+async function deriveLoaderId(env, guildId) {
+  const snowflake = BigInt(guildId);
+  const encoded = (snowflake ^ (await loaderMask(env))) & 0xffffffffffffffffn;
+  const routePart = encoded.toString(16).padStart(16, "0");
+  const tag = await hmacBytes(env.CONFIG_SECRET, `eternal-auth:loader-route:${routePart}`);
+  return `${routePart}${bytesToHex(tag).slice(0, 16)}`;
+}
+
+async function guildIdFromLoaderId(env, loaderId) {
+  if (!/^[a-f0-9]{32}$/i.test(loaderId || "")) return null;
+  try {
+    const routePart = loaderId.slice(0, 16).toLowerCase();
+    const encoded = BigInt(`0x${routePart}`);
+    const snowflake = encoded ^ (await loaderMask(env));
+    const guildId = snowflake.toString(10);
+    const expected = await deriveLoaderId(env, guildId);
+    return (await safeEqualText(expected, loaderId.toLowerCase())) ? guildId : null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureGuildLoaderId(env, guild) {
+  if (!guild) return null;
+  guild.loader_id = await deriveLoaderId(env, guild.guild_id);
+  return guild;
+}
+
+function loaderUrlForGuild(guild) {
+  if (!guild?.base_url || !guild?.loader_id) return null;
+  return `${String(guild.base_url).replace(/\/$/, "")}/files/v4/loaders/${guild.loader_id}.lua`;
+}
+
+async function deriveScriptLoaderId(env, scriptId) {
+  const tag = await hmacBytes(env.CONFIG_SECRET, `eternal-auth:script-loader:${scriptId}`);
+  return bytesToHex(tag).slice(0, 32);
+}
+
+async function ensureScriptLoaderId(env, script) {
+  if (!script) return null;
+  if (!script.loader_id) {
+    script.loader_id = await deriveScriptLoaderId(env, script.id);
+    await env.DB.prepare("UPDATE scripts SET loader_id = ?, updated_at = ? WHERE id = ?")
+      .bind(script.loader_id, now(), script.id)
+      .run();
+  }
+  return script;
+}
+
+function loaderUrlForScript(guild, script) {
+  if (!guild?.base_url || !script?.loader_id) return null;
+  return `${String(guild.base_url).replace(/\/$/, "")}/files/v4/loaders/${script.loader_id}.lua`;
+}
+
+function ffaLoaderUrlForScript(guild, script) {
+  if (!guild?.base_url || !script?.loader_id) return null;
+  return `${String(guild.base_url).replace(/\/$/, "")}/files/v4/ffa/${script.loader_id}.lua`;
+}
+
+async function getScriptsForGuild(env, guildId, enabledOnly = false) {
+  const cacheKey = `${guildId}:${enabledOnly ? "enabled" : "all"}`;
+  const cached = cacheGet(scriptHotCache, cacheKey);
+  if (cached) return cached.map((row) => ({ ...row }));
+
+  const stmt = enabledOnly
+    ? env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? AND enabled = 1 ORDER BY created_at ASC")
+    : env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC");
+  const result = await stmt.bind(guildId).all();
+  const rows = result.results || [];
+  await Promise.all(rows.map((row) => ensureScriptLoaderId(env, row)));
+  cachePut(scriptHotCache, cacheKey, rows.map((row) => ({ ...row })));
+  return rows;
+}
+
+async function ensureDefaultScript(env, guildId) {
+  let script = await env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC LIMIT 1")
+    .bind(guildId)
+    .first();
+  if (!script) {
+    const timestamp = now();
+    const id = crypto.randomUUID();
+    const loaderId = await deriveScriptLoaderId(env, id);
+    await env.DB.prepare(
+      `INSERT INTO scripts (id, guild_id, loader_id, name, version, enabled, content, created_at, updated_at)
+       VALUES (?, ?, ?, 'Eternal Auth Script', '1.0.0', 1, '', ?, ?)`
+    ).bind(id, guildId, loaderId, timestamp, timestamp).run();
+    script = await env.DB.prepare("SELECT * FROM scripts WHERE id = ?").bind(id).first();
+  }
+  return ensureScriptLoaderId(env, script);
+}
+
+async function createLicense(env, { guildId, discordId = null, days = -1, note = null }) {
+  const timestamp = now();
+  const id = crypto.randomUUID();
+  const rawKey = await deriveLicenseKey(env, id);
+  const keyHash = await sha256Hex(rawKey);
+  const authExpire = Number(days) > 0 ? timestamp + Number(days) * 86400 : -1;
+
+  await env.DB.prepare(
+    `INSERT INTO licenses
+      (id, guild_id, key_hash, discord_id, status, auth_expire, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`
+  )
+    .bind(id, guildId, keyHash, discordId, authExpire, note, timestamp, timestamp)
+    .run();
+
+  return { id, key: rawKey, auth_expire: authExpire };
+}
+
+async function findLicenseByKey(env, rawKey) {
+  const keyHash = await sha256Hex(rawKey);
+  return env.DB.prepare("SELECT * FROM licenses WHERE key_hash = ? LIMIT 1").bind(keyHash).first();
+}
+
+async function createServerSetupKey(env, { intendedGuildId = null, expiresInHours = 24, note = null }) {
+  const timestamp = now();
+  const id = crypto.randomUUID();
+  const random = crypto.getRandomValues(new Uint8Array(20));
+  const rawKey = `EA-SRV-${bytesToHex(random).toUpperCase()}`;
+  const keyHash = await sha256Hex(rawKey.toUpperCase());
+  const hours = Math.max(1, Math.min(24 * 30, Number(expiresInHours || 24)));
+  const expiresAt = timestamp + Math.floor(hours * 3600);
+  const hint = `${rawKey.slice(0, 14)}…${rawKey.slice(-6)}`;
+  const keyEnc = await encryptConfigSecret(env, rawKey);
+
+  await env.DB.prepare(
+    `INSERT INTO server_setup_keys
+      (id, key_hash, key_hint, key_enc, intended_guild_id, note, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(id, keyHash, hint, keyEnc, intendedGuildId || null, note || null, expiresAt, timestamp)
+    .run();
+
+  return { id, key: rawKey, key_hint: hint, intended_guild_id: intendedGuildId || null, note: note || null, expires_at: expiresAt, created_at: timestamp };
+}
+
+async function consumeServerSetupKey(env, rawKey, guildId, discordId) {
+  const normalized = String(rawKey || "").trim().toUpperCase();
+  if (!/^EA-SRV-[A-F0-9]{40}$/.test(normalized)) return { ok: false, error: "Invalid Eternal Auth server key." };
+
+  const keyHash = await sha256Hex(normalized);
+  const row = await env.DB.prepare(
+    `SELECT * FROM server_setup_keys WHERE key_hash = ? LIMIT 1`
+  ).bind(keyHash).first();
+
+  if (!row) return { ok: false, error: "Invalid Eternal Auth server key." };
+  if (row.used_at) return { ok: false, error: "That Eternal Auth server key has already been used." };
+  if (Number(row.expires_at) > 0 && Number(row.expires_at) <= now()) {
+    return { ok: false, error: "That Eternal Auth server key has expired." };
+  }
+  if (row.intended_guild_id && String(row.intended_guild_id) !== String(guildId)) {
+    return { ok: false, error: "That server key was created for a different Discord server." };
+  }
+
+  const usedAt = now();
+  const result = await env.DB.prepare(
+    `UPDATE server_setup_keys
+     SET used_at = ?, used_by_guild_id = ?, used_by_discord_id = ?
+     WHERE id = ? AND used_at IS NULL`
+  ).bind(usedAt, guildId, discordId, row.id).run();
+
+  if (!result?.meta?.changes) return { ok: false, error: "That Eternal Auth server key has already been used." };
+  return { ok: true, row: { ...row, used_at: usedAt, used_by_guild_id: guildId, used_by_discord_id: discordId } };
+}
+
+async function findLicenseForDiscord(env, guildId, discordId) {
+  return env.DB.prepare(
+    `SELECT * FROM licenses
+     WHERE guild_id = ? AND discord_id = ? AND status = 'active'
+     ORDER BY created_at DESC LIMIT 1`
+  )
+    .bind(guildId, discordId)
+    .first();
+}
+
+async function findAnyLicenseForDiscord(env, guildId, discordId) {
+  return env.DB.prepare(
+    `SELECT * FROM licenses WHERE guild_id = ? AND discord_id = ? ORDER BY created_at DESC LIMIT 1`
+  ).bind(guildId, discordId).first();
+}
+
+async function isBlacklisted(env, guildId, discordId) {
+  if (!discordId) return null;
+  const row = await env.DB.prepare(
+    "SELECT * FROM blacklists WHERE guild_id = ? AND discord_id = ? LIMIT 1"
+  )
+    .bind(guildId, discordId)
+    .first();
+  if (!row) return null;
+  if (row.expires_at !== -1 && row.expires_at <= now()) {
+    await env.DB.prepare("DELETE FROM blacklists WHERE guild_id = ? AND discord_id = ?")
+      .bind(guildId, discordId)
+      .run();
+    await env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND discord_id = ? AND status = 'blacklisted'")
+      .bind(now(), guildId, discordId)
+      .run();
+    return null;
+  }
+  return row;
+}
+
+async function validateLicense(env, license, deviceId = null, bindDevice = true) {
+  if (!license) return { ok: false, error: "Invalid key" };
+
+  if (license.status === "security_blacklisted" || await deviceBlocked(env, license.guild_id, license.hwid_hash, deviceId ? await hashDevice(env, deviceId) : null)) return { ok: false, error: "Blacklisted" };
+
+  const blocked = await isBlacklisted(env, license.guild_id, license.discord_id);
+  if (blocked) return { ok: false, error: "License is blacklisted", reason: blocked.reason || null };
+
+  // A temporary blacklist may have just expired and been cleared by isBlacklisted().
+  if (license.status === "blacklisted") {
+    await env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE id = ? AND status = 'blacklisted'")
+      .bind(now(), license.id)
+      .run();
+    license.status = "active";
+  }
+
+  if (license.status !== "active") return { ok: false, error: "License is disabled" };
+  if (license.auth_expire !== -1 && license.auth_expire <= now()) {
+    return { ok: false, error: "License expired" };
+  }
+
+  if (deviceId) {
+    const deviceHash = await hashDevice(env, deviceId);
+    if (!license.hwid_hash && bindDevice) {
+      if (!await bindDevice(env, license, deviceHash, now())) return { ok: false, error: "Device mismatch. Reset HWID first." };
+      license.hwid_hash = deviceHash;
+    } else if (license.hwid_hash && license.hwid_hash !== deviceHash) {
+      return { ok: false, error: "Device mismatch. Reset HWID first." };
+    }
+  }
+
+  return { ok: true };
+}
+
+async function handleSecurityReport(request, env) {
+  const body = await readJson(request);
+  const key = cleanText(body?.key, 256);
+  const deviceId = cleanText(body?.device_id, 512);
+  const reason = cleanText(body?.reason, 32);
+  if (!key || !deviceId) return publicJson({ ok: false, error: "Missing key or HWID" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  const license = await findLicenseByKey(env, key);
+  const hash = await hashDevice(env, deviceId);
+  // A report may only blacklist the authenticated key's already-bound device.
+  // Never accept a caller-supplied target license, user, guild or raw HWID hash.
+  if (!license || !license.hwid_hash || license.hwid_hash !== hash) return publicJson({ ok: false, error: "Invalid key or HWID" }, 403);
+  const timestamp = now();
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)").bind(license.guild_id, hash, reason, license.id, timestamp),
+    env.DB.prepare("UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)").bind(timestamp, license.guild_id, hash, license.id),
+  ]);
+  return publicJson({ ok: true, status: "Blacklisted" });
+}
+
+async function handleVerify(request, env) {
+  const body = await readJson(request);
+  const key = cleanText(body?.key, 256);
+  const deviceId = cleanText(body?.device_id, 512);
+  const scriptId = cleanText(body?.script_id, 128);
+  if (!key) return publicJson({ ok: false, error: "Missing key" }, 400);
+  if (!deviceId) return publicJson({ ok: false, error: "Missing HWID" }, 400);
+
+  const license = await findLicenseByKey(env, key);
+  const valid = await validateLicense(env, license, deviceId, true);
+  if (!valid.ok) return publicJson(valid, 403);
+
+  await env.DB.prepare("INSERT INTO executions (guild_id, license_id, occurred_at) VALUES (?, ?, ?)")
+    .bind(license.guild_id, license.id, now())
+    .run();
+
+  let script = null;
+  if (scriptId) {
+    script = await env.DB.prepare("SELECT id, name, version, enabled FROM scripts WHERE id = ? AND guild_id = ? LIMIT 1")
+      .bind(scriptId, license.guild_id)
+      .first();
+  } else {
+    script = await env.DB.prepare("SELECT id, name, version, enabled FROM scripts WHERE guild_id = ? ORDER BY created_at ASC LIMIT 1")
+      .bind(license.guild_id)
+      .first();
+  }
+
+  if (script && !script.enabled) return publicJson({ ok: false, error: "Script is disabled" }, 503);
+
+  return publicJson({
+    ok: true,
+    expires_at: license.auth_expire,
+    lifetime: license.auth_expire === -1,
+    note: license.note || null,
+    script: script ? { id: script.id, name: script.name, version: script.version } : null,
+  });
+}
+
+async function handleProtectedLoader(request, env, ctx) {
+  const url = new URL(request.url);
+  const { key, deviceId } = sourceCredentials(request);
+  const scriptId = cleanText(url.searchParams.get("script_id"), 128);
+
+  if (!key) {
+    return deniedSource();
+  }
+
+  if (!deviceId) return deniedSource();
+
+  // Fast path: hash the license key and HWID in parallel, then fetch the
+  // license, blacklist state and requested script in one D1 query.
+  const [keyHash, deviceHash] = await Promise.all([
+    sha256Hex(key),
+    deviceId ? hashDevice(env, deviceId) : Promise.resolve(null),
+  ]);
+
+  let row = null;
+  if (scriptId) {
+    row = await env.DB.prepare(`
+      SELECT
+        l.*,
+        b.reason AS ea_blacklist_reason,
+        b.expires_at AS ea_blacklist_expires_at,
+        s.id AS ea_script_id,
+        s.name AS ea_script_name,
+        s.version AS ea_script_version,
+        s.enabled AS ea_script_enabled,
+        s.content AS ea_script_content
+      FROM licenses l
+      LEFT JOIN blacklists b
+        ON b.guild_id = l.guild_id AND b.discord_id = l.discord_id
+      LEFT JOIN scripts s
+        ON s.id = ? AND s.guild_id = l.guild_id
+      WHERE l.key_hash = ?
+      LIMIT 1
+    `).bind(scriptId, keyHash).first();
+  } else {
+    row = await env.DB.prepare(`
+      SELECT
+        l.*,
+        b.reason AS ea_blacklist_reason,
+        b.expires_at AS ea_blacklist_expires_at
+      FROM licenses l
+      LEFT JOIN blacklists b
+        ON b.guild_id = l.guild_id AND b.discord_id = l.discord_id
+      WHERE l.key_hash = ?
+      LIMIT 1
+    `).bind(keyHash).first();
+  }
+
+  if (!row) {
+    return deniedSource();
+  }
+
+  if (row.status === "security_blacklisted" || await deviceBlocked(env, row.guild_id, deviceHash, row.hwid_hash)) {
+    return deniedSource();
+  }
+  const timestamp = now();
+  const blacklistExpiry = row.ea_blacklist_expires_at == null ? null : Number(row.ea_blacklist_expires_at);
+  const hasActiveBlacklist = blacklistExpiry != null && (blacklistExpiry === -1 || blacklistExpiry > timestamp);
+
+  if (hasActiveBlacklist) {
+    return deniedSource();
+  }
+
+  // Expired temporary blacklist cleanup is not part of the critical loader
+  // response path. Let Cloudflare finish it after the protected source is sent.
+  if (blacklistExpiry != null && blacklistExpiry !== -1 && blacklistExpiry <= timestamp) {
+    const cleanup = env.DB.batch([
+      env.DB.prepare("DELETE FROM blacklists WHERE guild_id = ? AND discord_id = ? AND expires_at != -1 AND expires_at <= ?")
+        .bind(row.guild_id, row.discord_id, timestamp),
+      env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE id = ? AND status = 'blacklisted'")
+        .bind(timestamp, row.id),
+    ]);
+    if (ctx?.waitUntil) ctx.waitUntil(cleanup); else await cleanup;
+    if (row.status === "blacklisted") row.status = "active";
+  }
+
+  if (row.status !== "active") {
+    const message = row.status === "disabled"
+      ? "The script you are trying to access has been disabled by its owner."
+      : `Eternal Auth: License is ${row.status || "disabled"}`;
+    return deniedSource();
+  }
+
+  if (Number(row.auth_expire) !== -1 && Number(row.auth_expire) <= timestamp) {
+    return deniedSource();
+  }
+
+  if (deviceHash) {
+    if (!row.hwid_hash) {
+      // Only the first device bind requires an awaited write. Normal executions
+      // skip this write completely.
+      if (!await bindDevice(env, row, deviceHash, timestamp)) return deniedSource();
+      row.hwid_hash = deviceHash;
+    } else if (row.hwid_hash !== deviceHash) {
+      return deniedSource();
+    }
+  }
+
+  let script = null;
+  if (scriptId) {
+    if (row.ea_script_id) {
+      script = {
+        id: row.ea_script_id,
+        name: row.ea_script_name,
+        version: row.ea_script_version,
+        enabled: row.ea_script_enabled,
+        content: row.ea_script_content,
+      };
+    }
+  } else {
+    // Backward-compatible direct calls without a script_id use the first script.
+    script = await env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC LIMIT 1")
+      .bind(row.guild_id)
+      .first();
+  }
+
+  if (!script || !script.enabled || !script.content) {
+    return deniedSource();
+  }
+
+  const executionLog = env.DB.prepare("INSERT INTO executions (guild_id, license_id, occurred_at) VALUES (?, ?, ?)")
+    .bind(row.guild_id, row.id, timestamp)
+    .run();
+  if (ctx?.waitUntil) ctx.waitUntil(executionLog); else await executionLog;
+
+  return new Response(script.content, {
+    status: 200,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store, no-cache, must-revalidate",
+      pragma: "no-cache",
+      "x-eternal-auth": "protected",
+      "x-eternal-script-id": script.id,
+    },
+  });
+}
+
+
+function isBrowserNavigation(request) {
+  const mode = (request.headers.get("sec-fetch-mode") || "").toLowerCase();
+  const dest = (request.headers.get("sec-fetch-dest") || "").toLowerCase();
+  const fetchUser = (request.headers.get("sec-fetch-user") || "").toLowerCase();
+  // Real top-level browser navigations normally carry these Fetch Metadata
+  // headers. We intentionally do not classify on Accept alone because some
+  // executor HTTP clients use broad browser-like Accept headers.
+  return mode === "navigate" || dest === "document" || fetchUser === "?1";
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[c]);
+}
+
+function loaderBrowserPage(loaderUrl) {
+  const snippet = `script_key = "KEY"; -- A key might be required, if not, delete this line.\nloadstring(game:HttpGet("${loaderUrl}"))()`;
+  const safeSnippet = escapeHtml(snippet);
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Eternal Auth • Loadstring</title>
+<style>
+  :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#181d31;color:#f4f6ff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center}.wrap{width:min(830px,calc(100% - 32px));text-align:center}.title{font-weight:800;font-size:21px;margin:0 0 20px}.card{position:relative;background:#111626;border:1px solid rgba(255,255,255,.035);border-radius:12px;padding:20px 78px 20px 18px;box-shadow:0 16px 40px rgba(0,0,0,.2);text-align:left;overflow:auto}.card pre{margin:0;white-space:pre;min-width:max-content;font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}.copy{position:absolute;right:12px;top:11px;border:1px solid #42507a;background:#27345d;color:#fff;border-radius:9px;padding:8px 14px;font-weight:700;cursor:pointer}.copy:hover{background:#324173}.note{font-size:12px;margin-top:17px;color:#d5d9e6}.brand{color:#8ba6ff}.comment{color:#6fbd73}.kw{color:#8ec5ff}.str{color:#ff8c7a}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1 class="title">📜 Loadstring</h1>
+  <section class="card">
+    <button class="copy" id="copyBtn" type="button">Copy</button>
+    <pre id="code">${safeSnippet}</pre>
+  </section>
+  <div class="note">Contents can not be displayed in browser • <span class="brand">Eternal Auth</span></div>
+</main>
+<script>
+  document.getElementById('copyBtn').addEventListener('click', async () => {
+    const b=document.getElementById('copyBtn');
+    try{await navigator.clipboard.writeText(document.getElementById('code').innerText);b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1200)}catch{b.textContent='Copy failed'}
+  });
+</script>
+</body>
+</html>`, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store, no-cache, must-revalidate",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    },
+  });
+}
+
+function protectedBrowserPage(origin) {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Eternal Auth</title><style>:root{color-scheme:dark}body{margin:0;min-height:100vh;background:#181d31;color:#f4f6ff;font-family:Inter,system-ui,sans-serif;display:grid;place-items:center}.box{text-align:center}.box h1{font-size:22px}.box p{color:#b9c0d4}</style></head><body><div class="box"><h1>🔒 Eternal Auth</h1><p>Protected source cannot be displayed in a browser.</p><p>${escapeHtml(origin)}</p></div></body></html>`, {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "x-content-type-options": "nosniff" },
+  });
+}
+
+function buildRobloxKickSource(message) {
+  return `local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+if player then
+    player:Kick(${JSON.stringify(message)})
+end`;
+}
+
+
+async function handlePublicLoader(request, env, loaderId, ctx) {
+  const credentials = sourceCredentials(request);
+  if (!credentials.key || !credentials.deviceId) return deniedSource();
+  const license = await findLicenseByKey(env, credentials.key);
+  if (!license) return deniedSource();
+
+  let script = await env.DB.prepare("SELECT * FROM scripts WHERE loader_id = ? LIMIT 1")
+    .bind(loaderId)
+    .first();
+  let guild = null;
+
+  if (script) {
+    script = await ensureScriptLoaderId(env, script);
+    guild = await getGuild(env, script.guild_id);
+  } else {
+    // Backward compatibility for the old one-loader-per-guild URLs.
+    const legacyGuildId = await guildIdFromLoaderId(env, loaderId);
+    guild = legacyGuildId ? await getGuild(env, legacyGuildId) : null;
+    if (guild) {
+      script = await env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC LIMIT 1")
+        .bind(guild.guild_id)
+        .first();
+      if (script) script = await ensureScriptLoaderId(env, script);
+    }
+  }
+
+  if (!guild || !script || !guild.active || !script.enabled || !script.content || license.guild_id !== guild.guild_id) return deniedSource();
+  const valid = await validateLicense(env, license, credentials.deviceId, true);
+  if (!valid.ok) return deniedSource();
+  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id), {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "Authorization, X-Eternal-Device", "x-content-type-options": "nosniff" },
+  });
+}
+
+async function handleFfaPublicLoader(request, env, loaderId) {
+  const { deviceId } = sourceCredentials(request);
+  if (!deviceId) return deniedSource();
+  const script = await env.DB.prepare("SELECT * FROM scripts WHERE loader_id = ? LIMIT 1")
+    .bind(loaderId)
+    .first();
+  if (!script || !script.enabled || !script.ffa_enabled || !script.content) return deniedSource();
+  const guild = await env.DB.prepare("SELECT * FROM guilds WHERE guild_id = ? LIMIT 1").bind(script.guild_id).first();
+  if (!guild?.active) return deniedSource();
+  const deviceHash = await hashDevice(env, deviceId);
+  if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
+  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true), {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "X-Eternal-Device", "x-content-type-options": "nosniff" },
+  });
+}
+
+async function handleFfaProtectedLoader(request, env) {
+  const url = new URL(request.url);
+  const { deviceId } = sourceCredentials(request);
+  const scriptId = cleanText(url.searchParams.get("script_id"), 128);
+  if (!deviceId || !scriptId) return deniedSource();
+  const script = await env.DB.prepare("SELECT * FROM scripts WHERE id = ? LIMIT 1")
+    .bind(scriptId)
+    .first();
+  if (!script || !script.enabled || !script.ffa_enabled || !script.content) return deniedSource();
+  const guild = await env.DB.prepare("SELECT * FROM guilds WHERE guild_id = ? LIMIT 1").bind(script.guild_id).first();
+  if (!guild?.active) return deniedSource();
+  const deviceHash = await hashDevice(env, deviceId);
+  if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
+  return new Response(script.content, {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "X-Eternal-Device", "x-eternal-auth": "ffa", "x-eternal-script-id": script.id, "x-content-type-options": "nosniff" },
+  });
+}
+
+function deniedSource() {
+  return new Response("Blacklisted", { status: 403, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" } });
+}
+
+function sourceCredentials(request) {
+  const url = new URL(request.url);
+  const bearer = (request.headers.get("authorization") || "").match(/^Bearer (.+)$/i);
+  return {
+    key: cleanText(bearer?.[1] || url.searchParams.get("key"), 256),
+    deviceId: cleanText(request.headers.get("x-eternal-device") || url.searchParams.get("device_id"), 512),
+  };
+}
+
+
+function buildBootstrapSource(origin, scriptId, ffa = false) {
+  const apiUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa-loader" : "loader"}?script_id=${encodeURIComponent(scriptId)}`;
+  const keySetup = ffa
+    ? `local key="FFA"`
+    : `local key=e.script_key or script_key
+if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to access this script. No key found.") return end`;
+  const reportAttempt = ffa ? "" : `    if __ea_request then
+        pcall(__ea_request,{
+            Url=__ea_report_url,Method="POST",
+            Headers={["Content-Type"]="application/json"},
+            Body=H:JSONEncode({key=tostring(key),device_id=tostring(d),reason=reason})
+        })
+    end`;
+  const protectedUrl = ffa
+    ? `local u="${apiUrl}&device_id="..H:UrlEncode(tostring(d))`
+    : `local u="${apiUrl}&key="..H:UrlEncode(tostring(key)).."&device_id="..H:UrlEncode(tostring(d))`;
+  return `-- Eternal Auth fast bootstrap + seven-layer source leak guard
+local H=game:GetService("HttpService")
+local P=game:GetService("Players")
+local lp=P.LocalPlayer
+local function K(m) if lp then pcall(function() lp:Kick(tostring(m or "Authentication failed.")) end) end end
+
+local e=(getgenv and getgenv()) or _G
+${keySetup}
+
+-- Prefer the executor's device identifier; fallback is a local installation id.
+local d
+pcall(function() if type(gethwid)=="function" then d=gethwid() end end)
+if not d or tostring(d)=="" then
+    if readfile and writefile then
+        local f="eternal_auth_device.txt"
+        local ok,v=pcall(readfile,f)
+        if ok and v and v~="" then d=v else d=H:GenerateGUID(false) pcall(writefile,f,d) end
+    end
+end
+if not d or tostring(d)=="" then K("Missing HWID") return end
+local __ea_request=request or http_request or (syn and syn.request) or (http and http.request)
+local __ea_report_url=${JSON.stringify(`${String(origin).replace(/\/$/, "")}/api/v1/security/report`)}
+local __ea_stopped=false
+local __ea_protected_source=nil
+local function __ea_block(reason)
+    if __ea_stopped then return "Blacklisted" end
+    __ea_stopped=true
+${reportAttempt}
+    K("Blacklisted")
+    return "Blacklisted"
+end
+
+-- Match actual delivered source instead of banning arbitrary long UI text.
+-- Encoded, transformed, tiny fragments or preinstalled hooks can evade this.
+local function __ea_source_like(v)
+    if type(v)~="string" or not __ea_protected_source then return false end
+    local src=__ea_protected_source
+    if #src>=16 and string.find(v,src,1,true) then return true end
+    if #v>=160 and string.find(src,v,1,true) then return true end
+    if #v>=160 and #src>=160 then
+        for pos=1,math.min(#v-159,65536),80 do
+            if string.find(src,string.sub(v,pos,pos+159),1,true) then return true end
+        end
+    end
+    return false
+end
+
+local __ea_guard_refs={}
+local function __ea_track(env,name,expected)
+    for _,ref in ipairs(__ea_guard_refs) do
+        if ref.env==env and ref.name==name then ref.expected=expected return end
+    end
+    table.insert(__ea_guard_refs,{env=env,name=name,expected=expected})
+end
+local function __ea_envs()
+    local t={}
+    local seen={}
+    local function add(v) if type(v)=="table" and not seen[v] then seen[v]=true table.insert(t,v) end end
+    add(_G)
+    pcall(function() if getgenv then add(getgenv()) end end)
+    pcall(function() if getrenv then add(getrenv()) end end)
+    return t
+end
+
+local function __ea_wrap_global(name, mode)
+    for _,env in ipairs(__ea_envs()) do
+        pcall(function()
+            if type(env)~="table" then return end
+            local old=rawget(env,name)
+            if type(old)~="function" then return end
+            local wrap
+            if mode=="clipboard" then
+                wrap=function(...) return nil end
+            else
+                wrap=function(...)
+                    local a={...}
+                    for i=1,#a do if __ea_source_like(a[i]) then return __ea_block("console") end end
+                    return old(...)
+                end
+            end
+            env[name]=wrap
+            __ea_track(env,name,wrap)
+            pcall(function()
+                if hookfunction then old=hookfunction(old,wrap) end
+            end)
+        end)
+    end
+end
+
+-- Layer 1: normal Lua output sinks.
+for _,n in ipairs({"print","warn"}) do __ea_wrap_global(n,"filter") end
+
+-- Layer 2: executor/console output sinks.
+for _,n in ipairs({"rconsoleprint","rconsolewarn","rconsoleerr","rconsoleinfo","consoleprint","consolewarn","consoleerror"}) do
+    __ea_wrap_global(n,"filter")
+end
+
+-- Layer 3: replace clipboard writes before reporting or kicking.
+local __ea_clipboard_busy=false
+local __ea_clipboard_wrappers={}
+local function __ea_install_clipboard(env,name)
+    local old=rawget(env,name)
+    if type(old)~="function" then return end
+    local existing=__ea_clipboard_wrappers[old]
+    if existing then env[name]=existing __ea_track(env,name,existing) return end
+    local original=old
+    local wrapper
+    wrapper=function(...)
+        if __ea_clipboard_busy then return "Blacklisted" end
+        __ea_clipboard_busy=true
+        -- Never forward the requested text, even when the report fails.
+        pcall(original,"Blacklisted")
+        __ea_clipboard_busy=false
+        __ea_block("clipboard")
+        return "Blacklisted"
+    end
+    if type(hookfunction)=="function" then
+        local ok,unhooked=pcall(hookfunction,old,wrapper)
+        if ok and type(unhooked)=="function" then original=unhooked end
+    end
+    __ea_clipboard_wrappers[old]=wrapper
+    __ea_clipboard_wrappers[wrapper]=wrapper
+    env[name]=wrapper
+    __ea_track(env,name,wrapper)
+end
+for _,env in ipairs(__ea_envs()) do
+    for _,name in ipairs({"setclipboard","toclipboard","writeclipboard","set_clipboard","setrbxclipboard"}) do
+        pcall(__ea_install_clipboard,env,name)
+    end
+    if type(env.clipboard)=="table" then
+        for _,name in ipairs({"set","write","copy"}) do
+            pcall(__ea_install_clipboard,env.clipboard,name)
+        end
+    end
+end
+
+-- Layer 4: file-output sinks. Normal small/non-source writes remain usable.
+for _,env in ipairs(__ea_envs()) do
+    for _,name in ipairs({"writefile","appendfile"}) do
+        pcall(function()
+            local old=rawget(env,name)
+            if type(old)~="function" then return end
+            local wrap=function(path,data,...)
+                if __ea_source_like(data) then return __ea_block("file") end
+                return old(path,data,...)
+            end
+            env[name]=wrap
+            __ea_track(env,name,wrap)
+            pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
+        end)
+    end
+end
+
+-- Layer 5: TextBox/TextLabel/TextButton source dumping.
+pcall(function()
+    if not hookmetamethod or not newcclosure then return end
+    local oldNewIndex
+    oldNewIndex=hookmetamethod(game,"__newindex",newcclosure(function(obj,keyName,value)
+        if keyName=="Text" and __ea_source_like(value) then
+            local ok,isText=pcall(function()
+                return obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton")
+            end)
+            if ok and isText then
+                oldNewIndex(obj,keyName,"Blacklisted")
+                __ea_block("gui")
+                return
+            end
+        end
+        return oldNewIndex(obj,keyName,value)
+    end))
+end)
+
+-- Layer 6: common executor HTTP/request exfiltration sinks. Requests only get
+-- blocked when their outgoing body contains source-like text.
+for _,env in ipairs(__ea_envs()) do
+    for _,name in ipairs({"request","http_request","httprequest"}) do
+        pcall(function()
+            local old=rawget(env,name)
+            if type(old)~="function" then return end
+            local wrap=function(opts,...)
+                if type(opts)=="table" then
+                    local body=opts.Body or opts.body or opts.Data or opts.data
+                    if __ea_source_like(body) then __ea_block("network") return {Success=false,StatusCode=403,Body="Blacklisted"} end
+                elseif __ea_source_like(opts) then
+                    return __ea_block("network")
+                end
+                return old(opts,...)
+            end
+            env[name]=wrap
+            __ea_track(env,name,wrap)
+            pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
+        end)
+    end
+    pcall(function()
+        if type(env.syn)=="table" and type(env.syn.request)=="function" then
+            local old=env.syn.request
+            local wrap=function(opts,...)
+                local body=type(opts)=="table" and (opts.Body or opts.body or opts.Data or opts.data) or nil
+                if __ea_source_like(body) then __ea_block("network") return {Success=false,StatusCode=403,Body="Blacklisted"} end
+                return old(opts,...)
+            end
+            env.syn.request=wrap
+            __ea_track(env.syn,"request",wrap)
+            pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
+        end
+    end)
+end
+
+-- Layer 7: lightweight integrity watchdog. If high-value guards are replaced,
+-- terminate this client session rather than continuing with weakened guards.
+task.spawn(function()
+    while not __ea_stopped and task.wait(2.5) do
+        for _,ref in ipairs(__ea_guard_refs) do
+            if rawget(ref.env,ref.name)~=ref.expected then
+                __ea_block("integrity") return
+            end
+        end
+    end
+end)
+
+${protectedUrl}
+if not __ea_request then K("Eternal Auth requires an HTTP request function.") return end
+local verified,result=pcall(__ea_request,{Url=u,Method="GET"})
+if not verified or not result then K("Eternal Auth connection failed.") return end
+local code=tonumber(result.StatusCode or result.status_code or 0)
+local s=result.Body or result.body or ""
+if code~=200 then
+    if string.find(s,"Blacklisted",1,true) then K("Blacklisted")
+    else K("Eternal Auth denied access ("..tostring(code).."). Check your key and HWID.") end
+    return
+end
+if __ea_stopped then return end
+__ea_protected_source=s
+local f,err=loadstring(s)
+if not f then K("Eternal Auth loader error: "..tostring(err)) return end
+f()`;
+}
+
+
+let backendSchemaReadyPromise = null;
+
+async function ensureBackendPersistenceSchema(env) {
+  if (backendSchemaReadyPromise) return backendSchemaReadyPromise;
+
+  backendSchemaReadyPromise = (async () => {
+    await env.DB.batch([
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_credentials (
+        id TEXT PRIMARY KEY,
+        password_salt TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        iterations INTEGER NOT NULL DEFAULT 100000,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_sessions (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
+      )`),
+      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
+        ON admin_sessions(expires_at)`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_state (
+        id TEXT PRIMARY KEY,
+        last_guild_id TEXT,
+        active_tab TEXT NOT NULL DEFAULT 'gateway',
+        preferences_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER NOT NULL
+      )`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS runtime_state (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS panels (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT 'Eternal Auth Panel',
+        channel_id TEXT,
+        manager_role_id TEXT,
+        buyer_role_id TEXT,
+        loader_template TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`),
+      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_panels_guild_active
+        ON panels(guild_id, active, created_at DESC)`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS panel_drafts (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT,
+        manager_role_id TEXT,
+        buyer_role_id TEXT,
+        loader_template TEXT NOT NULL,
+        uploaded_loader_url TEXT,
+        selected_script_id TEXT,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )`),
+      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_panel_drafts_expires
+        ON panel_drafts(expires_at)`),
+    ]);
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO admin_state (id, active_tab, preferences_json, updated_at)
+       VALUES ('primary', 'gateway', '{}', ?)`
+    ).bind(now()).run();
+
+    // v1.7 added encrypted storage for generated server setup keys. Check the
+    // live schema first so this is safe both before and after the SQL migration.
+    const tableInfo = await env.DB.prepare("PRAGMA table_info(server_setup_keys)").all();
+    const columns = Array.isArray(tableInfo?.results) ? tableInfo.results : [];
+    if (columns.length && !columns.some((column) => String(column.name) === "key_enc")) {
+      await env.DB.prepare("ALTER TABLE server_setup_keys ADD COLUMN key_enc TEXT").run();
+    }
+
+    const panelInfo = await env.DB.prepare("PRAGMA table_info(panels)").all();
+    const panelColumns = Array.isArray(panelInfo?.results) ? panelInfo.results : [];
+    const panelColumnNames = new Set(panelColumns.map((column) => String(column.name)));
+    if (panelColumns.length && !panelColumnNames.has("embed_title")) {
+      await env.DB.prepare("ALTER TABLE panels ADD COLUMN embed_title TEXT").run();
+    }
+    if (panelColumns.length && !panelColumnNames.has("embed_description")) {
+      await env.DB.prepare("ALTER TABLE panels ADD COLUMN embed_description TEXT").run();
+    }
+    if (panelColumns.length && !panelColumnNames.has("embed_color")) {
+      await env.DB.prepare("ALTER TABLE panels ADD COLUMN embed_color INTEGER").run();
+    }
+    if (panelColumns.length && !panelColumnNames.has("script_id")) {
+      await env.DB.prepare("ALTER TABLE panels ADD COLUMN script_id TEXT").run();
+    }
+
+    return true;
+  })().catch((error) => {
+    backendSchemaReadyPromise = null;
+    throw error;
+  });
+
+  return backendSchemaReadyPromise;
+}
+
+const ADMIN_PASSWORD_ITERATIONS = 100000;
+
+async function deriveAdminPasswordHash(password, saltBytes, iterations = ADMIN_PASSWORD_ITERATIONS) {
+  // Cloudflare Workers currently rejects PBKDF2 iteration counts above 100,000.
+  const safeIterations = Math.max(1, Math.min(100000, Number(iterations) || ADMIN_PASSWORD_ITERATIONS));
+  const material = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(String(password)),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: safeIterations },
+    material,
+    256
+  );
+  return new Uint8Array(bits);
+}
+
+async function getAdminCredential(env) {
+  return env.DB.prepare("SELECT * FROM admin_credentials WHERE id = 'primary' LIMIT 1").first();
+}
+
+async function bootstrapAdminCredential(env) {
+  let row = await getAdminCredential(env);
+  if (row) return row;
+  if (!env.ADMIN_PASSWORD) return null;
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await deriveAdminPasswordHash(env.ADMIN_PASSWORD, salt, ADMIN_PASSWORD_ITERATIONS);
+  const timestamp = now();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO admin_credentials
+      (id, password_salt, password_hash, iterations, created_at, updated_at)
+     VALUES ('primary', ?, ?, ?, ?, ?)`
+  ).bind(
+    bytesToBase64Url(salt),
+    bytesToBase64Url(hash),
+    ADMIN_PASSWORD_ITERATIONS,
+    timestamp,
+    timestamp
+  ).run();
+  return getAdminCredential(env);
+}
+
+async function verifyAdminPassword(env, password) {
+  const row = await bootstrapAdminCredential(env);
+  if (!row) return false;
+  const actual = await deriveAdminPasswordHash(
+    password,
+    base64UrlToBytes(row.password_salt),
+    Number(row.iterations || ADMIN_PASSWORD_ITERATIONS)
+  );
+  const expected = base64UrlToBytes(row.password_hash);
+  if (actual.length !== expected.length) return false;
+  if (typeof crypto.subtle.timingSafeEqual === "function") {
+    return crypto.subtle.timingSafeEqual(actual, expected);
+  }
+  let diff = 0;
+  for (let i = 0; i < actual.length; i++) diff |= actual[i] ^ expected[i];
+  return diff === 0;
+}
+
+function adminSessionCookieToken(request) {
+  const cookie = request.headers.get("cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)ea_session=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+async function createAdminSession(env) {
+  const rawToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const tokenHash = await sha256Hex(rawToken);
+  const timestamp = now();
+  const expiresAt = timestamp + 12 * 3600;
+  await env.DB.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").bind(timestamp).run();
+  await env.DB.prepare(
+    `INSERT INTO admin_sessions (id, token_hash, created_at, expires_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(crypto.randomUUID(), tokenHash, timestamp, expiresAt, timestamp).run();
+  return { token: rawToken, expires_at: expiresAt };
+}
+
+async function verifyAdminSession(request, env) {
+  const rawToken = adminSessionCookieToken(request);
+  if (!rawToken) return false;
+  const tokenHash = await sha256Hex(rawToken);
+  const row = await env.DB.prepare(
+    "SELECT * FROM admin_sessions WHERE token_hash = ? LIMIT 1"
+  ).bind(tokenHash).first();
+  if (!row) return false;
+  const timestamp = now();
+  if (Number(row.expires_at) <= timestamp) {
+    await env.DB.prepare("DELETE FROM admin_sessions WHERE id = ?").bind(row.id).run();
+    return false;
+  }
+  if (timestamp - Number(row.last_seen_at || 0) >= 300) {
+    await env.DB.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?")
+      .bind(timestamp, row.id)
+      .run();
+  }
+  return row;
+}
+
+async function handleAdminLogin(request, env) {
+  const body = await readJson(request);
+  const password = body?.password ?? "";
+  if (!(await verifyAdminPassword(env, password))) {
+    return json({ ok: false, error: "Invalid password" }, 401);
+  }
+  const session = await createAdminSession(env);
+  return json({ ok: true, backend_persisted: true }, 200, {
+    "set-cookie": `ea_session=${session.token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=43200`,
+  });
+}
+
+async function handleAdminLogout(request, env) {
+  const rawToken = adminSessionCookieToken(request);
+  if (rawToken) {
+    const tokenHash = await sha256Hex(rawToken);
+    await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
+  }
+  return json({ ok: true }, 200, {
+    "set-cookie": "ea_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+  });
+}
+
+async function getAdminState(env) {
+  let row = await env.DB.prepare("SELECT * FROM admin_state WHERE id = 'primary' LIMIT 1").first();
+  if (!row) {
+    await env.DB.prepare(
+      "INSERT INTO admin_state (id, last_guild_id, active_tab, preferences_json, updated_at) VALUES ('primary', NULL, 'gateway', '{}', ?)"
+    ).bind(now()).run();
+    row = await env.DB.prepare("SELECT * FROM admin_state WHERE id = 'primary' LIMIT 1").first();
+  }
+  let preferences = {};
+  try { preferences = JSON.parse(row?.preferences_json || "{}"); } catch {}
+  return {
+    last_guild_id: row?.last_guild_id || null,
+    active_tab: row?.active_tab || "gateway",
+    preferences,
+    updated_at: row?.updated_at || null,
+  };
+}
+
+async function saveAdminState(env, body) {
+  const current = await getAdminState(env);
+  const lastGuildId = body?.last_guild_id === undefined
+    ? current.last_guild_id
+    : cleanText(body.last_guild_id, 64) || null;
+  const allowedTabs = new Set(["gateway", "serverkeys", "licenses", "stock", "blacklists", "panels", "script", "logs", "backend"]);
+  const requestedTab = cleanText(body?.active_tab, 32);
+  const activeTab = requestedTab && allowedTabs.has(requestedTab) ? requestedTab : current.active_tab;
+  const preferences = body?.preferences && typeof body.preferences === "object" && !Array.isArray(body.preferences)
+    ? body.preferences
+    : current.preferences;
+  const preferencesJson = JSON.stringify(preferences).slice(0, 16000);
+  await env.DB.prepare(
+    `INSERT INTO admin_state (id, last_guild_id, active_tab, preferences_json, updated_at)
+     VALUES ('primary', ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_guild_id = excluded.last_guild_id,
+       active_tab = excluded.active_tab,
+       preferences_json = excluded.preferences_json,
+       updated_at = excluded.updated_at`
+  ).bind(lastGuildId, activeTab, preferencesJson, now()).run();
+  return getAdminState(env);
+}
+
+async function handleAdminApi(request, env, url, ctx) {
+  if (url.pathname === "/api/admin/state" && request.method === "GET") {
+    return json({ ok: true, state: await getAdminState(env) });
+  }
+
+  if (url.pathname === "/api/admin/state" && request.method === "PUT") {
+    const body = await readJson(request);
+    return json({ ok: true, state: await saveAdminState(env, body || {}) });
+  }
+
+  if (url.pathname === "/api/admin/account/password" && request.method === "POST") {
+    const body = await readJson(request);
+    const currentPassword = body?.current_password ?? "";
+    const newPassword = String(body?.new_password ?? "");
+    if (!(await verifyAdminPassword(env, currentPassword))) {
+      return json({ ok: false, error: "Current admin password is incorrect" }, 401);
+    }
+    if (newPassword.length < 12 || newPassword.length > 256) {
+      return json({ ok: false, error: "New admin password must be 12-256 characters" }, 400);
+    }
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const hash = await deriveAdminPasswordHash(newPassword, salt, ADMIN_PASSWORD_ITERATIONS);
+    await env.DB.prepare(
+      `UPDATE admin_credentials SET password_salt = ?, password_hash = ?, iterations = ?, updated_at = ? WHERE id = 'primary'`
+    ).bind(bytesToBase64Url(salt), bytesToBase64Url(hash), ADMIN_PASSWORD_ITERATIONS, now()).run();
+    await env.DB.prepare("DELETE FROM admin_sessions").run();
+    await audit(env, null, "admin.password_changed", "dashboard", "primary", {});
+    return json({ ok: true, reauthenticate: true }, 200, {
+      "set-cookie": "ea_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+    });
+  }
+
+  if (url.pathname === "/api/admin/backend/status" && request.method === "GET") {
+    const [credential, state, sessions, runtime] = await Promise.all([
+      getAdminCredential(env),
+      getAdminState(env),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM admin_sessions WHERE expires_at > ?").bind(now()).first(),
+      env.DB.prepare("SELECT value_json, updated_at FROM runtime_state WHERE key = 'gateway' LIMIT 1").first(),
+    ]);
+    let gatewaySnapshot = null;
+    try { gatewaySnapshot = runtime?.value_json ? JSON.parse(runtime.value_json) : null; } catch {}
+    return json({
+      ok: true,
+      backend: {
+        admin_credential_in_d1: !!credential,
+        active_sessions: sessions?.n || 0,
+        state,
+        gateway_snapshot: gatewaySnapshot,
+        gateway_snapshot_updated_at: runtime?.updated_at || null,
+        secrets_location: "Cloudflare Worker Secrets",
+      },
+    });
+  }
+  if (url.pathname === "/api/admin/gateway/status" && request.method === "GET") {
+    try {
+      const status = await ensureGatewayPresence(env);
+      return json({ ok: true, gateway: status });
+    } catch (error) {
+      console.error("Gateway status failed:", error);
+      return json({ ok: false, error: `Gateway unavailable: ${String(error?.message || error)}` }, 503);
+    }
+  }
+
+  if (url.pathname === "/api/admin/gateway/wake" && request.method === "POST") {
+    try {
+      const status = await ensureGatewayPresence(env);
+      return json({ ok: true, gateway: status });
+    } catch (error) {
+      console.error("Gateway wake failed:", error);
+      return json({ ok: false, error: `Could not start Gateway: ${String(error?.message || error)}` }, 503);
+    }
+  }
+
+  if (url.pathname === "/api/admin/stats" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    const guildClause = guildId ? "WHERE guild_id = ?" : "";
+    const bind = (stmt) => (guildId ? stmt.bind(guildId) : stmt);
+
+    const [licenses, active, codes, executions, guilds, scripts] = await Promise.all([
+      bind(env.DB.prepare(`SELECT COUNT(*) AS n FROM licenses ${guildClause}`)).first(),
+      bind(env.DB.prepare(`SELECT COUNT(*) AS n FROM licenses ${guildClause ? guildClause + " AND" : "WHERE"} status = 'active'`)).first(),
+      bind(env.DB.prepare(`SELECT COUNT(*) AS n FROM redeem_codes ${guildClause}`)).first(),
+      guildId
+        ? env.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE guild_id = ? AND occurred_at >= ?").bind(guildId, now() - 86400).first()
+        : env.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE occurred_at >= ?").bind(now() - 86400).first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM guilds WHERE active = 1").first(),
+      guildId
+        ? env.DB.prepare("SELECT COUNT(*) AS n FROM scripts WHERE guild_id = ?").bind(guildId).first()
+        : env.DB.prepare("SELECT COUNT(*) AS n FROM scripts").first(),
+    ]);
+
+    return json({
+      ok: true,
+      stats: {
+        licenses: licenses?.n || 0,
+        active_licenses: active?.n || 0,
+        redeem_codes: codes?.n || 0,
+        executions_24h: executions?.n || 0,
+        guilds: guilds?.n || 0,
+        scripts: scripts?.n || 0,
+      },
+    });
+  }
+
+  if (url.pathname === "/api/admin/guilds" && request.method === "GET") {
+    const result = await env.DB.prepare(
+      "SELECT guild_id, active, manager_role_id, buyer_role_id, base_url, created_at, updated_at FROM guilds ORDER BY created_at DESC"
+    ).all();
+    return json({ ok: true, guilds: result.results || [] });
+  }
+
+  if (url.pathname === "/api/admin/server-keys" && request.method === "GET") {
+    const result = await env.DB.prepare(
+      `SELECT id, key_hint, key_enc, intended_guild_id, note, expires_at, created_at, used_at, used_by_guild_id, used_by_discord_id
+       FROM server_setup_keys
+       ORDER BY created_at DESC LIMIT 250`
+    ).all();
+    const keys = [];
+    for (const row of result.results || []) {
+      let fullKey = null;
+      if (row.key_enc) {
+        try { fullKey = await decryptConfigSecret(env, row.key_enc); } catch {}
+      }
+      const { key_enc, ...safeRow } = row;
+      keys.push({ ...safeRow, key: fullKey });
+    }
+    return json({ ok: true, keys });
+  }
+
+  if (url.pathname === "/api/admin/server-keys" && request.method === "POST") {
+    const body = await readJson(request);
+    const password = body?.password ?? "";
+    if (!(await verifyAdminPassword(env, password))) {
+      return json({ ok: false, error: "Admin password confirmation failed" }, 401);
+    }
+
+    const intendedGuildId = cleanText(body?.intended_guild_id, 64);
+    if (intendedGuildId && !/^\d{15,22}$/.test(intendedGuildId)) {
+      return json({ ok: false, error: "intended_guild_id must be a Discord server ID" }, 400);
+    }
+    const expiresInHours = Math.max(1, Math.min(720, Number(body?.expires_in_hours ?? 24)));
+    const note = cleanText(body?.note, 300);
+    const created = await createServerSetupKey(env, { intendedGuildId, expiresInHours, note });
+    await audit(env, intendedGuildId || null, "admin.create_server_key", "dashboard", created.id, {
+      intended_guild_id: intendedGuildId || null,
+      expires_in_hours: expiresInHours,
+      note,
+    });
+    return json({ ok: true, server_key: created });
+  }
+
+  const serverKeyMatch = url.pathname.match(/^\/api\/admin\/server-keys\/([^/]+)$/);
+  if (serverKeyMatch && request.method === "DELETE") {
+    const id = decodeURIComponent(serverKeyMatch[1]);
+    const row = await env.DB.prepare(
+      "SELECT id, intended_guild_id, used_at FROM server_setup_keys WHERE id = ? LIMIT 1"
+    ).bind(id).first();
+    if (!row) return json({ ok: false, error: "Server key not found" }, 404);
+    if (row.used_at) return json({ ok: false, error: "Used server keys cannot be revoked" }, 409);
+    await env.DB.prepare("DELETE FROM server_setup_keys WHERE id = ?").bind(id).run();
+    await audit(env, row.intended_guild_id || null, "admin.revoke_server_key", "dashboard", id, {});
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/admin/licenses" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    const q = cleanText(url.searchParams.get("q"), 128);
+    let sql = `SELECT id, guild_id, discord_id, status, auth_expire, note, hwid_hash, last_hwid_reset, created_at, updated_at
+               FROM licenses`;
+    const args = [];
+    const where = [];
+    if (guildId) {
+      where.push("guild_id = ?");
+      args.push(guildId);
+    }
+    if (q) {
+      where.push("(discord_id LIKE ? OR note LIKE ? OR id LIKE ?)");
+      const like = `%${q}%`;
+      args.push(like, like, like);
+    }
+    if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
+    sql += " ORDER BY created_at DESC LIMIT 250";
+    const result = await env.DB.prepare(sql).bind(...args).all();
+    return json({ ok: true, licenses: result.results || [] });
+  }
+
+  if (url.pathname === "/api/admin/licenses" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const guild = await getGuild(env, guildId);
+    if (!guild) return json({ ok: false, error: "Unknown guild. Run /login in Discord first." }, 404);
+
+    const discordId = cleanText(body?.discord_id, 64);
+    const days = Number(body?.days ?? -1);
+    const note = cleanText(body?.note, 300);
+    if (discordId && (await isBlacklisted(env, guildId, discordId))) {
+      return json({ ok: false, error: "That Discord user is blacklisted" }, 409);
+    }
+    if (discordId) {
+      const existing = await findLicenseForDiscord(env, guildId, discordId);
+      if (existing) return json({ ok: false, error: "User already has an active license" }, 409);
+    }
+
+    const license = await createLicense(env, { guildId, discordId, days, note });
+    await audit(env, guildId, "admin.whitelist", "dashboard", discordId || license.id, { days, note });
+    return json({ ok: true, license });
+  }
+
+  const licenseMatch = url.pathname.match(/^\/api\/admin\/licenses\/([^/]+)(?:\/(reset-hwid))?$/);
+  if (licenseMatch) {
+    const id = decodeURIComponent(licenseMatch[1]);
+    const action = licenseMatch[2];
+    if (request.method === "DELETE" && !action) {
+      const row = await env.DB.prepare("SELECT guild_id, discord_id FROM licenses WHERE id = ?").bind(id).first();
+      if (!row) return json({ ok: false, error: "License not found" }, 404);
+      await env.DB.prepare("DELETE FROM licenses WHERE id = ?").bind(id).run();
+      await audit(env, row.guild_id, "admin.unwhitelist", "dashboard", row.discord_id || id, {});
+      return json({ ok: true });
+    }
+    if (request.method === "POST" && action === "reset-hwid") {
+      const row = await env.DB.prepare("SELECT guild_id, discord_id FROM licenses WHERE id = ?").bind(id).first();
+      if (!row) return json({ ok: false, error: "License not found" }, 404);
+      await env.DB.prepare("UPDATE licenses SET hwid_hash = NULL, last_hwid_reset = ?, updated_at = ? WHERE id = ?")
+        .bind(now(), now(), id)
+        .run();
+      await audit(env, row.guild_id, "admin.reset_hwid", "dashboard", row.discord_id || id, { forced: true });
+      return json({ ok: true });
+    }
+  }
+
+  if (url.pathname === "/api/admin/stock-keys" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const result = await env.DB.prepare(
+      `SELECT id, guild_id, auth_expire, note, created_at
+       FROM licenses
+       WHERE guild_id = ? AND discord_id IS NULL AND status = 'active'
+       ORDER BY created_at DESC LIMIT 250`
+    ).bind(guildId).all();
+    const keys = [];
+    for (const row of result.results || []) {
+      keys.push({ ...row, key: await deriveLicenseKey(env, row.id) });
+    }
+    return json({ ok: true, keys });
+  }
+
+  if (url.pathname === "/api/admin/stock-keys" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    if (!(await getGuild(env, guildId))) return json({ ok: false, error: "Unknown guild" }, 404);
+    const days = Number(body?.days ?? -1);
+    const quantity = Math.max(1, Math.min(100, Number(body?.quantity ?? 1)));
+    const note = cleanText(body?.note, 300);
+    const keys = [];
+    for (let i = 0; i < quantity; i++) {
+      const created = await createLicense(env, { guildId, discordId: null, days, note: note || "Stock key" });
+      keys.push(created.key);
+    }
+    await audit(env, guildId, "admin.create_stock_keys", "dashboard", guildId, { days, quantity, note });
+    return json({ ok: true, keys });
+  }
+
+  if (url.pathname === "/api/admin/codes" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    const stmt = guildId
+      ? env.DB.prepare("SELECT id, guild_id, days, uses_left, note, expires_at, created_at FROM redeem_codes WHERE guild_id = ? ORDER BY created_at DESC LIMIT 250").bind(guildId)
+      : env.DB.prepare("SELECT id, guild_id, days, uses_left, note, expires_at, created_at FROM redeem_codes ORDER BY created_at DESC LIMIT 250");
+    const result = await stmt.all();
+    return json({ ok: true, codes: result.results || [] });
+  }
+
+  if (url.pathname === "/api/admin/codes" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    if (!(await getGuild(env, guildId))) return json({ ok: false, error: "Unknown guild" }, 404);
+
+    const days = Number(body?.days ?? -1);
+    const uses = Math.max(1, Math.min(10000, Number(body?.uses ?? 1)));
+    const note = cleanText(body?.note, 300);
+    const expiresInDays = Number(body?.expires_in_days ?? -1);
+    const rawCode = cleanText(body?.code, 128) || `ETERNAL-${bytesToBase64Url(crypto.getRandomValues(new Uint8Array(12))).toUpperCase()}`;
+    const codeHash = await sha256Hex(rawCode.toUpperCase());
+    const expiresAt = expiresInDays > 0 ? now() + expiresInDays * 86400 : -1;
+    const id = crypto.randomUUID();
+
+    try {
+      await env.DB.prepare(
+        "INSERT INTO redeem_codes (id, guild_id, code_hash, days, uses_left, note, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+        .bind(id, guildId, codeHash, days, uses, note, expiresAt, now())
+        .run();
+    } catch {
+      return json({ ok: false, error: "Code already exists" }, 409);
+    }
+
+    await audit(env, guildId, "admin.create_code", "dashboard", id, { days, uses, note });
+    return json({ ok: true, code: rawCode, id });
+  }
+
+  if (url.pathname === "/api/admin/hwid-blacklists" && request.method === "GET") {
+    const result = await env.DB.prepare("SELECT * FROM hwid_blacklists ORDER BY created_at DESC LIMIT 250").all();
+    return json({ ok: true, blacklists: result.results || [] });
+  }
+  if (url.pathname === "/api/admin/hwid-blacklists" && request.method === "DELETE") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 32);
+    const hash = cleanText(body?.hwid_hash, 128);
+    if (!guildId || !/^[a-f0-9]{64}$/.test(hash)) return json({ ok: false, error: "Guild and HWID hash required" }, 400);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND status = 'security_blacklisted' AND (hwid_hash = ? OR id IN (SELECT license_id FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ?))").bind(now(), guildId, hash, guildId, hash),
+      env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ?").bind(guildId, hash),
+    ]);
+    await audit(env, guildId, "admin.unblacklist_hwid", "dashboard", hash, {});
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/admin/blacklists" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    const stmt = guildId
+      ? env.DB.prepare("SELECT guild_id, discord_id, reason, expires_at, created_at FROM blacklists WHERE guild_id = ? ORDER BY created_at DESC LIMIT 250").bind(guildId)
+      : env.DB.prepare("SELECT guild_id, discord_id, reason, expires_at, created_at FROM blacklists ORDER BY created_at DESC LIMIT 250");
+    const result = await stmt.all();
+    return json({ ok: true, blacklists: result.results || [] });
+  }
+
+  if (url.pathname === "/api/admin/blacklists" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    const discordId = cleanText(body?.discord_id, 64);
+    const reason = cleanText(body?.reason, 300);
+    const days = Number(body?.days ?? -1);
+    if (!guildId || !discordId) return json({ ok: false, error: "guild_id and discord_id are required" }, 400);
+    const expiresAt = days > 0 ? now() + days * 86400 : -1;
+    await env.DB.prepare(
+      `INSERT INTO blacklists (guild_id, discord_id, reason, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(guild_id, discord_id) DO UPDATE SET reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at`
+    ).bind(guildId, discordId, reason, expiresAt, now()).run();
+    await env.DB.prepare("UPDATE licenses SET status = 'blacklisted', updated_at = ? WHERE guild_id = ? AND discord_id = ?")
+      .bind(now(), guildId, discordId).run();
+    await audit(env, guildId, "admin.blacklist", "dashboard", discordId, { days, reason });
+    return json({ ok: true });
+  }
+
+  const blacklistMatch = url.pathname.match(/^\/api\/admin\/blacklists\/([^/]+)\/([^/]+)$/);
+  if (blacklistMatch && request.method === "DELETE") {
+    const guildId = decodeURIComponent(blacklistMatch[1]);
+    const discordId = decodeURIComponent(blacklistMatch[2]);
+    await env.DB.prepare("DELETE FROM blacklists WHERE guild_id = ? AND discord_id = ?").bind(guildId, discordId).run();
+    await env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND discord_id = ? AND status = 'blacklisted'")
+      .bind(now(), guildId, discordId).run();
+    await audit(env, guildId, "admin.unblacklist", "dashboard", discordId, {});
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/admin/compensate" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    const days = Math.max(1, Math.min(3650, Number(body?.days || 1)));
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const result = await env.DB.prepare(
+      "UPDATE licenses SET auth_expire = auth_expire + ?, updated_at = ? WHERE guild_id = ? AND auth_expire > 0"
+    ).bind(days * 86400, now(), guildId).run();
+    await audit(env, guildId, "admin.compensate", "dashboard", guildId, { days });
+    return json({ ok: true, changed: result.meta?.changes || 0 });
+  }
+
+  if (url.pathname === "/api/admin/panels" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const result = await env.DB.prepare(
+      `SELECT id, guild_id, name, channel_id, manager_role_id, buyer_role_id, active, created_by, created_at, updated_at
+       FROM panels WHERE guild_id = ? ORDER BY created_at DESC LIMIT 250`
+    ).bind(guildId).all();
+    return json({ ok: true, panels: result.results || [] });
+  }
+
+  const adminPanelMatch = url.pathname.match(/^\/api\/admin\/panels\/([^/]+)$/);
+  if (adminPanelMatch && request.method === "DELETE") {
+    const panelId = decodeURIComponent(adminPanelMatch[1]);
+    const row = await env.DB.prepare("SELECT guild_id FROM panels WHERE id = ? LIMIT 1").bind(panelId).first();
+    if (!row) return json({ ok: false, error: "Panel not found" }, 404);
+    await env.DB.prepare("UPDATE panels SET active = 0, updated_at = ? WHERE id = ?").bind(now(), panelId).run();
+    await audit(env, row.guild_id, "admin.disable_panel", "dashboard", panelId, {});
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/admin/scripts" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const guild = await getGuild(env, guildId);
+    if (!guild) return json({ ok: false, error: "Unknown guild" }, 404);
+    await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
+    const scripts = await getScriptsForGuild(env, guildId, false);
+    const safeScripts = scripts.map((script) => ({
+      id: script.id,
+      guild_id: script.guild_id,
+      loader_id: script.loader_id,
+      loader_url: loaderUrlForScript(guild, script),
+      ffa_loader_url: ffaLoaderUrlForScript(guild, script),
+      name: script.name,
+      version: script.version,
+      enabled: !!script.enabled,
+      ffa_enabled: !!script.ffa_enabled,
+      content_size: String(script.content || "").length,
+      created_at: script.created_at,
+      updated_at: script.updated_at,
+    }));
+    return json({ ok: true, scripts: safeScripts });
+  }
+
+  if (url.pathname === "/api/admin/scripts" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const guild = await getGuild(env, guildId);
+    if (!guild) return json({ ok: false, error: "Unknown guild" }, 404);
+    await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
+
+    const id = crypto.randomUUID();
+    const loaderId = await deriveScriptLoaderId(env, id);
+    const sourceFileName = cleanScriptUploadFileName(body?.source_file_name);
+    const rawContent = body?.content == null ? "" : String(body.content);
+    if (!sourceFileName) return json({ ok: false, error: "A supported uploaded text/script file is required (.txt, .lua, .luau, etc.)." }, 400);
+    if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
+    if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
+    const name = cleanText(body?.name, 100) || sourceFileName.replace(/\.[^.]+$/, "") || "Uploaded Script";
+    const version = cleanText(body?.version, 40) || "1.0.0";
+    const enabled = body?.enabled === false ? 0 : 1;
+    const ffaEnabled = body?.ffa_enabled === true ? 1 : 0;
+    const content = rawContent;
+    const timestamp = now();
+
+    await env.DB.prepare(
+      `INSERT INTO scripts (id, guild_id, loader_id, name, version, enabled, ffa_enabled, content, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, guildId, loaderId, name, version, enabled, ffaEnabled, content, timestamp, timestamp).run();
+    cacheDelete(scriptHotCache, `${guildId}:all`);
+    cacheDelete(scriptHotCache, `${guildId}:enabled`);
+
+    const script = await env.DB.prepare("SELECT * FROM scripts WHERE id = ?").bind(id).first();
+    await audit(env, guildId, "admin.create_script", "dashboard", id, { name, version, enabled: !!enabled, source_file_name: sourceFileName });
+    return json({ ok: true, script: { ...script, enabled: !!script.enabled, ffa_enabled: !!script.ffa_enabled, loader_url: loaderUrlForScript(guild, script), ffa_loader_url: ffaLoaderUrlForScript(guild, script) } }, 201);
+  }
+
+  const adminScriptMatch = url.pathname.match(/^\/api\/admin\/scripts\/([^/]+)$/);
+  if (adminScriptMatch && request.method === "PUT") {
+    const scriptId = decodeURIComponent(adminScriptMatch[1]);
+    const existing = await env.DB.prepare("SELECT * FROM scripts WHERE id = ? LIMIT 1").bind(scriptId).first();
+    if (!existing) return json({ ok: false, error: "Script not found" }, 404);
+    const body = await readJson(request);
+    const name = cleanText(body?.name, 100) || existing.name || "Eternal Auth Script";
+    const version = cleanText(body?.version, 40) || existing.version || "1.0.0";
+    const enabled = body?.enabled == null ? Number(existing.enabled) : (body.enabled === false ? 0 : 1);
+    const ffaEnabled = body?.ffa_enabled == null ? Number(existing.ffa_enabled || 0) : (body.ffa_enabled === true ? 1 : 0);
+    let content = existing.content;
+    let sourceFileName = null;
+    if (body?.content != null) {
+      sourceFileName = cleanScriptUploadFileName(body?.source_file_name);
+      const rawContent = String(body.content);
+      if (!sourceFileName) return json({ ok: false, error: "Replacing protected source requires an uploaded text/script file." }, 400);
+      if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
+      if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
+      content = rawContent;
+    }
+    await env.DB.prepare("UPDATE scripts SET name = ?, version = ?, enabled = ?, ffa_enabled = ?, content = ?, updated_at = ? WHERE id = ?")
+      .bind(name, version, enabled, ffaEnabled, content, now(), scriptId)
+      .run();
+    cacheDelete(scriptHotCache, `${existing.guild_id}:all`);
+    cacheDelete(scriptHotCache, `${existing.guild_id}:enabled`);
+    const guild = await getGuild(env, existing.guild_id);
+    if (guild) await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
+    const script = await ensureScriptLoaderId(env, await env.DB.prepare("SELECT * FROM scripts WHERE id = ?").bind(scriptId).first());
+    await audit(env, existing.guild_id, "admin.update_script", "dashboard", scriptId, { name, version, enabled: !!enabled, ffa_enabled: !!ffaEnabled, source_file_name: sourceFileName });
+    return json({ ok: true, script: { ...script, enabled: !!script.enabled, ffa_enabled: !!script.ffa_enabled, loader_url: guild ? loaderUrlForScript(guild, script) : null, ffa_loader_url: guild ? ffaLoaderUrlForScript(guild, script) : null } });
+  }
+
+  if (adminScriptMatch && request.method === "DELETE") {
+    const scriptId = decodeURIComponent(adminScriptMatch[1]);
+    const existing = await env.DB.prepare("SELECT * FROM scripts WHERE id = ? LIMIT 1").bind(scriptId).first();
+    if (!existing) return json({ ok: false, error: "Script not found" }, 404);
+    await env.DB.prepare("DELETE FROM scripts WHERE id = ?").bind(scriptId).run();
+    cacheDelete(scriptHotCache, `${existing.guild_id}:all`);
+    cacheDelete(scriptHotCache, `${existing.guild_id}:enabled`);
+    await audit(env, existing.guild_id, "admin.delete_script", "dashboard", scriptId, { name: existing.name });
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/admin/config" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const guild = await getGuild(env, guildId);
+    if (guild) await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
+    let script = guild ? await env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC LIMIT 1").bind(guildId).first() : null;
+    if (script) script = await ensureScriptLoaderId(env, script);
+    const safeGuild = guild ? {
+      guild_id: guild.guild_id,
+      active: guild.active,
+      manager_role_id: guild.manager_role_id,
+      buyer_role_id: guild.buyer_role_id,
+      base_url: guild.base_url,
+      loader_id: script?.loader_id || guild.loader_id,
+      loader_url: script ? loaderUrlForScript(guild, script) : loaderUrlForGuild(guild),
+      loader_template: guild.loader_template,
+      logs_enabled: !!guild.log_webhook_enc,
+      created_at: guild.created_at,
+      updated_at: guild.updated_at,
+    } : null;
+    return json({ ok: true, guild: safeGuild, script });
+  }
+
+  if (url.pathname === "/api/admin/config" && request.method === "PUT") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    const guild = await getGuild(env, guildId);
+    if (!guild) return json({ ok: false, error: "Unknown guild" }, 404);
+
+    if (body.loader_template != null) {
+      await env.DB.prepare("UPDATE guilds SET loader_template = ?, updated_at = ? WHERE guild_id = ?")
+        .bind(String(body.loader_template).slice(0, 12000), now(), guildId)
+        .run();
+    }
+
+    // Protected source is file-upload only in v1.6.1. Older clients are not
+    // allowed to paste source through the legacy config endpoint.
+    if (body.script_content != null) {
+      return json({ ok: false, error: "Protected source must be uploaded as a text/script file." }, 400);
+    }
+
+    await audit(env, guildId, "admin.update_config", "dashboard", guildId, { loader_template: body.loader_template != null });
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/admin/logs" && request.method === "GET") {
+    const guildId = cleanText(url.searchParams.get("guild_id"), 64);
+    const stmt = guildId
+      ? env.DB.prepare("SELECT * FROM audit_logs WHERE guild_id = ? ORDER BY created_at DESC LIMIT 250").bind(guildId)
+      : env.DB.prepare("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 250");
+    const result = await stmt.all();
+    return json({ ok: true, logs: result.results || [] });
+  }
+
+  return json({ ok: false, error: "Not found" }, 404);
+}
+
+async function getGuild(env, guildId) {
+  const cached = cacheGet(guildHotCache, guildId);
+  if (cached) return { ...cached };
+  const guild = await env.DB.prepare("SELECT * FROM guilds WHERE guild_id = ? AND active = 1 LIMIT 1").bind(guildId).first();
+  const ready = await ensureGuildLoaderId(env, guild);
+  if (ready) cachePut(guildHotCache, guildId, { ...ready });
+  return ready;
+}
+
+async function ensureGuildBaseUrl(env, guild, origin) {
+  if (!guild) return guild;
+  const normalized = String(origin || "").replace(/\/$/, "");
+  if (!normalized) return guild;
+  if (guild.base_url !== normalized) {
+    await env.DB.prepare("UPDATE guilds SET base_url = ?, updated_at = ? WHERE guild_id = ?")
+      .bind(normalized, now(), guild.guild_id)
+      .run();
+    guild.base_url = normalized;
+    cachePut(guildHotCache, guild.guild_id, { ...guild });
+  }
+  return guild;
+}
+
+async function audit(env, guildId, action, actorId, target, details = {}) {
+  const safeDetails = JSON.stringify(details).slice(0, 4000);
+  await env.DB.prepare(
+    "INSERT INTO audit_logs (guild_id, action, actor_id, target, details, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  )
+    .bind(guildId || null, action, actorId || null, target || null, safeDetails, now())
+    .run();
+}
+
+async function verifyDiscordRequest(request, env) {
+  const signature = request.headers.get("x-signature-ed25519");
+  const timestamp = request.headers.get("x-signature-timestamp");
+  if (!signature || !timestamp || !env.DISCORD_PUBLIC_KEY) return null;
+
+  const rawBody = await request.text();
+  try {
+    const publicKey = await crypto.subtle.importKey(
+      "raw",
+      hexToBytes(env.DISCORD_PUBLIC_KEY),
+      { name: "Ed25519" },
+      false,
+      ["verify"]
+    );
+    const valid = await crypto.subtle.verify(
+      { name: "Ed25519" },
+      publicKey,
+      hexToBytes(signature),
+      enc.encode(timestamp + rawBody)
+    );
+    if (!valid) return null;
+    return JSON.parse(rawBody);
+  } catch (error) {
+    console.error("Discord verify error", error);
+    return null;
+  }
+}
+
+function discordMessage(content, ephemeral = true, components = undefined) {
+  const data = { content, allowed_mentions: { parse: [] } };
+  if (ephemeral) data.flags = EPHEMERAL;
+  if (components) data.components = components;
+  return json({ type: 4, data });
+}
+
+function discordModal(customId, title, label, placeholder = "") {
+  return json({
+    type: 9,
+    data: {
+      custom_id: customId,
+      title,
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 4,
+              custom_id: "value",
+              style: 1,
+              label,
+              placeholder,
+              required: true,
+              min_length: 1,
+              max_length: 128,
+            },
+          ],
+        },
+      ],
+    },
+  });
+}
+
+function interactionUserId(interaction) {
+  return interaction.member?.user?.id || interaction.user?.id || null;
+}
+
+function optionMap(interaction) {
+  return Object.fromEntries((interaction.data?.options || []).map((o) => [o.name, o.value]));
+}
+
+function memberIsAdmin(interaction) {
+  try {
+    return (BigInt(interaction.member?.permissions || "0") & ADMINISTRATOR) === ADMINISTRATOR;
+  } catch {
+    return false;
+  }
+}
+
+function memberIsManager(interaction, guild) {
+  if (memberIsAdmin(interaction)) return true;
+  const roles = interaction.member?.roles || [];
+  return !!guild?.manager_role_id && roles.includes(guild.manager_role_id);
+}
+
+async function getPanel(env, guildId, panelId) {
+  if (!panelId) return null;
+  const cacheKey = `${guildId}:${panelId}`;
+  const cached = cacheGet(panelHotCache, cacheKey);
+  if (cached) return { ...cached };
+  const panel = await env.DB.prepare(
+    "SELECT * FROM panels WHERE id = ? AND guild_id = ? AND active = 1 LIMIT 1"
+  ).bind(panelId, guildId).first();
+  if (panel) cachePut(panelHotCache, cacheKey, { ...panel });
+  return panel;
+}
+
+function guildForPanel(guild, panel) {
+  if (!panel) return guild;
+  return {
+    ...guild,
+    manager_role_id: panel.manager_role_id || guild.manager_role_id || null,
+    buyer_role_id: panel.buyer_role_id || guild.buyer_role_id || null,
+    loader_template: panel.loader_template || guild.loader_template || defaultLoaderTemplate(),
+  };
+}
+
+async function handleDiscordInteraction(request, env, ctx) {
+  const interaction = await verifyDiscordRequest(request, env);
+  if (!interaction) return new Response("Invalid request signature", { status: 401 });
+
+  if (interaction.type === 1) return json({ type: 1 });
+
+  if (interaction.type === 3) {
+    return handleDiscordComponent(interaction, env, ctx);
+  }
+
+  if (interaction.type === 5) {
+    return handleDiscordModalSubmit(interaction, env, ctx);
+  }
+
+  if (interaction.type !== 2) return discordMessage("Unsupported interaction.");
+
+  const name = interaction.data?.name;
+  const guildId = interaction.guild_id;
+  const userId = interactionUserId(interaction);
+  if (!guildId || !userId) return discordMessage("Eternal Auth commands must be used in a server.");
+
+  const opts = optionMap(interaction);
+
+  if (name === "login") {
+    if (!memberIsAdmin(interaction)) return discordMessage("Only a Discord server administrator can run `/login`.");
+
+    const existingGuild = await getGuild(env, guildId);
+    if (existingGuild) {
+      await ensureGuildBaseUrl(env, existingGuild, new URL(request.url).origin);
+      const existingLoaderUrl = loaderUrlForGuild(existingGuild);
+      return discordMessage(existingLoaderUrl
+        ? `Eternal Auth is already linked to this server.\n\n**Loader URL:**\n${existingLoaderUrl}`
+        : "Eternal Auth is already linked to this server.");
+    }
+
+    const serverKey = cleanText(opts.key, 512) || "";
+    const consumed = await consumeServerSetupKey(env, serverKey, guildId, userId);
+    if (!consumed.ok) return discordMessage(consumed.error);
+
+    const timestamp = now();
+    const baseUrl = new URL(request.url).origin;
+    await env.DB.prepare(
+      `INSERT INTO guilds
+        (guild_id, active, base_url, loader_template, created_at, updated_at)
+       VALUES (?, 1, ?, ?, ?, ?)
+       ON CONFLICT(guild_id) DO UPDATE SET
+         active = 1,
+         base_url = excluded.base_url,
+         updated_at = excluded.updated_at`
+    )
+      .bind(guildId, baseUrl, defaultLoaderTemplate(), timestamp, timestamp)
+      .run();
+
+    await audit(env, guildId, "discord.login", userId, guildId, { server_key_id: consumed.row.id });
+    return discordMessage("✅ Eternal Auth is linked. That server key has been consumed and cannot be reused. Now run `/setpanel` with your loader template, manager role, and optional buyer role.");
+  }
+
+  const guild = await getGuild(env, guildId);
+  if (!guild) return discordMessage("Eternal Auth is not configured here yet. A server administrator must run `/login`.");
+  await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
+
+  if (name === "logout") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    await env.DB.prepare("UPDATE guilds SET active = 0, updated_at = ? WHERE guild_id = ?")
+      .bind(now(), guildId)
+      .run();
+    await audit(env, guildId, "discord.logout", userId, guildId, {});
+    return discordMessage("✅ Eternal Auth has been logged out from this server.");
+  }
+
+  if (name === "setlogs") {
+    if (!memberIsManager(interaction, guild) && !memberIsAdmin(interaction)) return discordMessage("Manager permission required.");
+    const webhook = cleanText(opts.webhook, 1000);
+    if (!webhook) return discordMessage("Provide a Discord webhook URL, or `off` to disable logs.");
+    if (webhook.toLowerCase() === "off") {
+      await env.DB.prepare("UPDATE guilds SET log_webhook_enc = NULL, updated_at = ? WHERE guild_id = ?")
+        .bind(now(), guildId)
+        .run();
+      await audit(env, guildId, "discord.setlogs", userId, "disabled", {});
+      return discordMessage("✅ Eternal Auth command logs are disabled.");
+    }
+    if (!/^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(webhook)) {
+      return discordMessage("That does not look like a Discord webhook URL.");
+    }
+    const encrypted = await encryptConfigSecret(env, webhook);
+    await env.DB.prepare("UPDATE guilds SET log_webhook_enc = ?, updated_at = ? WHERE guild_id = ?")
+      .bind(encrypted, now(), guildId)
+      .run();
+    await audit(env, guildId, "discord.setlogs", userId, "webhook", {});
+    return discordMessage("✅ Eternal Auth logs will be sent through that webhook.");
+  }
+
+  if (name === "setpanel") {
+    if (!memberIsManager(interaction, guild) && !memberIsAdmin(interaction)) return discordMessage("Manager permission required.");
+
+    const attachmentId = cleanText(opts.loader_script, 64);
+    const managerRole = cleanText(opts.manager_role, 64);
+    const buyerRole = cleanText(opts.buyer_role, 64);
+    if (!attachmentId || !managerRole || !buyerRole) {
+      return discordMessage("`loader_script`, `manager_role`, and `buyer_role` are required.");
+    }
+
+    const attachment = interaction.data?.resolved?.attachments?.[attachmentId];
+    if (!attachment?.url) return discordMessage("I could not read the uploaded loader script attachment.");
+
+    const fileName = String(attachment.filename || "loader.lua");
+    const extension = fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")).toLowerCase() : "";
+    const allowedExtensions = new Set([".lua", ".luau", ".txt", ".md", ".cfg", ".ini", ".json", ".js", ".ts", ".xml", ".yaml", ".yml", ".py", ".rb", ".sh", ".ps1", ".bat", ".cmd", ".toml", ".conf", ".log"]);
+    if (!allowedExtensions.has(extension)) {
+      return discordMessage("Upload a text/script file such as `.lua`, `.luau`, or `.txt` for `loader_script`.");
+    }
+    if (Number(attachment.size || 0) > 1024 * 1024) {
+      return discordMessage("The loader script file is too large. Keep it under 1 MB.");
+    }
+
+    // The attachment download and project lookup are independent. Start both
+    // immediately so Discord waits for one network round trip instead of two.
+    const attachmentPromise = (async () => {
+      const attachmentUrl = new URL(attachment.url);
+      if (attachmentUrl.protocol !== "https:") throw new Error("Attachment URL must use HTTPS");
+      const response = await fetch(attachmentUrl.toString(), {
+        headers: { "user-agent": "EternalAuth/1.8.6" },
+        cf: { cacheTtl: 30, cacheEverything: true },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.text()).replace(/^\uFEFF/, "").trim();
+    })();
+    const scriptsPromise = getScriptsForGuild(env, guildId, true);
+
+    let uploadedText, enabledScripts;
+    try {
+      [uploadedText, enabledScripts] = await Promise.all([attachmentPromise, scriptsPromise]);
+    } catch (error) {
+      console.error("Eternal Auth setpanel preload failed", error);
+      return discordMessage("I could not prepare the uploaded loader script. Please try again.");
+    }
+
+    if (!uploadedText) return discordMessage("The uploaded loader script file is empty.");
+    const uploadedLoaderUrl = extractLoaderUrl(uploadedText);
+    if (!uploadedLoaderUrl) {
+      return discordMessage('The loader file only needs a normal Eternal Auth loadstring, for example `loadstring(game:HttpGet("https://.../files/v4/loaders/LOADER_ID.lua"))()` (a bare loader URL also works).');
+    }
+
+    let parsedLoaderUrl;
+    try { parsedLoaderUrl = new URL(uploadedLoaderUrl); }
+    catch { return discordMessage("The uploaded loader URL is invalid."); }
+    if (parsedLoaderUrl.protocol !== "https:") return discordMessage("The loader URL must use HTTPS.");
+
+    const loaderMatch = parsedLoaderUrl.pathname.match(/^\/files\/v4\/loaders\/([a-f0-9]{32})\.lua$/i);
+    if (!loaderMatch) return discordMessage("The uploaded loadstring must point to an Eternal Auth `/files/v4/loaders/<loader-id>.lua` URL.");
+
+    enabledScripts = (enabledScripts || []).slice(0, 25);
+    if (!enabledScripts.length) return discordMessage("This Eternal Auth project has no enabled scripts to link a panel to.");
+
+    const draftId = crypto.randomUUID();
+    const ts = now();
+    const loaderTemplate = `script_key="{{KEY}}";\nloadstring(game:HttpGet(${JSON.stringify(uploadedLoaderUrl)}))()`;
+    const draftRecord = {
+      id: draftId, guild_id: guildId, channel_id: interaction.channel_id || null,
+      manager_role_id: managerRole, buyer_role_id: buyerRole, loader_template: loaderTemplate,
+      uploaded_loader_url: uploadedLoaderUrl, selected_script_id: null, created_by: userId,
+      created_at: ts, expires_at: ts + 900,
+    };
+    await env.DB.prepare(
+      `INSERT INTO panel_drafts
+        (id, guild_id, channel_id, manager_role_id, buyer_role_id, loader_template, uploaded_loader_url, created_by, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(draftId, guildId, interaction.channel_id || null, managerRole, buyerRole, loaderTemplate, uploadedLoaderUrl, userId, ts, ts + 900).run();
+    cachePut(draftHotCache, draftId, draftRecord, 15 * 60_000);
+
+    const projectOptions = enabledScripts.map((script) => ({
+      label: String(script.name || "Unnamed Script").slice(0, 100),
+      description: `Version ${String(script.version || "1.0.0")}`.slice(0, 100),
+      value: script.id,
+    }));
+
+    return json({
+      type: 4,
+      data: {
+        flags: EPHEMERAL,
+        embeds: [{
+          title: "[2/3] Select a project",
+          description: `Selected manager role: <@&${managerRole}>\nSelected buyer role: <@&${buyerRole}>\n\nPlease select a project to link this panel to`,
+          color: 0x2563eb,
+          timestamp: new Date().toISOString(),
+        }],
+        components: [{
+          type: 1,
+          components: [{
+            type: 3,
+            custom_id: `eternal:setpanel_project:${draftId}`,
+            placeholder: "Select a project",
+            min_values: 1,
+            max_values: 1,
+            options: projectOptions,
+          }],
+        }],
+      },
+    });
+  }
+
+  if (name === "whitelist") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const target = cleanText(opts.user, 64);
+    const days = Number(opts.days ?? -1);
+    const note = cleanText(opts.note, 300);
+    if (await isBlacklisted(env, guildId, target)) return discordMessage("That user is blacklisted.");
+    if (await findLicenseForDiscord(env, guildId, target)) return discordMessage("That user already has an active license.");
+
+    const license = await createLicense(env, { guildId, discordId: target, days, note });
+    ctx.waitUntil(addBuyerRole(env, guild, target));
+    ctx.waitUntil(dmLoader(env, guild, target, license.key, guild.base_url));
+    await audit(env, guildId, "discord.whitelist", userId, target, { days, note });
+    ctx.waitUntil(sendLog(env, guild, `✅ Whitelisted <@${target}>${days > 0 ? ` for ${days} day(s)` : " (lifetime)"}.`));
+    return discordMessage(`✅ Whitelisted <@${target}>. Key: \`${license.key}\``);
+  }
+
+  if (name === "unwhitelist") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const target = cleanText(opts.user, 64);
+    const result = await env.DB.prepare("DELETE FROM licenses WHERE guild_id = ? AND discord_id = ?")
+      .bind(guildId, target)
+      .run();
+    ctx.waitUntil(removeBuyerRole(env, guild, target));
+    await audit(env, guildId, "discord.unwhitelist", userId, target, { deleted: result.meta?.changes || 0 });
+    ctx.waitUntil(sendLog(env, guild, `🗑️ Unwhitelisted <@${target}>.`));
+    return discordMessage(`✅ Unwhitelisted <@${target}>.`);
+  }
+
+  if (name === "blacklist") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const target = cleanText(opts.user, 64);
+    const days = Number(opts.days ?? -1);
+    const reason = cleanText(opts.reason, 300);
+    const expiresAt = days > 0 ? now() + days * 86400 : -1;
+    await env.DB.prepare(
+      `INSERT INTO blacklists (guild_id, discord_id, reason, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+         reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at`
+    )
+      .bind(guildId, target, reason, expiresAt, now())
+      .run();
+    await env.DB.prepare("UPDATE licenses SET status = 'blacklisted', updated_at = ? WHERE guild_id = ? AND discord_id = ?")
+      .bind(now(), guildId, target)
+      .run();
+    ctx.waitUntil(removeBuyerRole(env, guild, target));
+    await audit(env, guildId, "discord.blacklist", userId, target, { days, reason });
+    ctx.waitUntil(sendLog(env, guild, `⛔ Blacklisted <@${target}>${reason ? ` — ${reason}` : ""}`));
+    return discordMessage(`✅ Blacklisted <@${target}>.`);
+  }
+
+  if (name === "unblacklist") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const target = cleanText(opts.user, 64);
+    await env.DB.prepare("DELETE FROM blacklists WHERE guild_id = ? AND discord_id = ?")
+      .bind(guildId, target)
+      .run();
+    await env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND discord_id = ? AND status = 'blacklisted'")
+      .bind(now(), guildId, target)
+      .run();
+    await audit(env, guildId, "discord.unblacklist", userId, target, {});
+    return discordMessage(`✅ Removed blacklist for <@${target}>.`);
+  }
+
+  if (name === "compensate") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const days = Math.max(1, Number(opts.days || 1));
+    await env.DB.prepare(
+      "UPDATE licenses SET auth_expire = auth_expire + ?, updated_at = ? WHERE guild_id = ? AND auth_expire > 0"
+    )
+      .bind(days * 86400, now(), guildId)
+      .run();
+    await audit(env, guildId, "discord.compensate", userId, guildId, { days });
+    ctx.waitUntil(sendLog(env, guild, `🎁 Added ${days} day(s) to all expiring Eternal Auth licenses.`));
+    return discordMessage(`✅ Added ${days} day(s) to all non-lifetime licenses.`);
+  }
+
+  if (name === "force-resethwid") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const target = cleanText(opts.user, 64);
+    const license = await findAnyLicenseForDiscord(env, guildId, target);
+    if (!license) return discordMessage("That user has no Eternal Auth license.");
+    await env.DB.prepare("UPDATE licenses SET hwid_hash = NULL, last_hwid_reset = ?, updated_at = ? WHERE id = ?")
+      .bind(now(), now(), license.id)
+      .run();
+    await audit(env, guildId, "discord.force_resethwid", userId, target, {});
+    return discordMessage(`✅ Forced an HWID reset for <@${target}>.`);
+  }
+
+  if (name === "mass-whitelist") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const roleId = cleanText(opts.role, 64);
+    const days = Number(opts.days ?? -1);
+    const members = await fetchGuildMembersWithRole(env, guildId, roleId);
+    let added = 0;
+    let skipped = 0;
+    for (const member of members) {
+      if (member.user?.bot) continue;
+      const target = member.user?.id;
+      if (!target || (await isBlacklisted(env, guildId, target)) || (await findLicenseForDiscord(env, guildId, target))) {
+        skipped++;
+        continue;
+      }
+      await createLicense(env, { guildId, discordId: target, days, note: `Mass whitelist from role ${roleId}` });
+      added++;
+    }
+    await audit(env, guildId, "discord.mass_whitelist", userId, roleId, { days, added, skipped });
+    return discordMessage(`✅ Mass whitelist complete. Added: **${added}** • Skipped: **${skipped}**.`);
+  }
+
+  if (name === "redeem") {
+    const code = cleanText(opts.code, 128);
+    return redeemForDiscord(env, guild, userId, code, ctx);
+  }
+
+  if (name === "resethwid") {
+    return resetOwnHwid(env, guild, userId, ctx);
+  }
+
+  if (name === "script") {
+    return sendOwnScript(env, guild, userId, interaction);
+  }
+
+  if (name === "ffa") {
+    return sendFfaScript(env, guild, opts.script);
+  }
+
+  if (name === "getrole") {
+    const license = await findLicenseForDiscord(env, guildId, userId);
+    const valid = await validateLicense(env, license, null, false);
+    if (!valid.ok) return discordMessage(valid.error);
+    const ok = await addBuyerRole(env, guild, userId);
+    return discordMessage(ok ? "✅ Your buyer role has been restored." : "Your access is valid, but no buyer role is configured or I could not assign it.");
+  }
+
+  if (name === "stats") {
+    if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
+    const [licenses, blacklisted, execs] = await Promise.all([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM licenses WHERE guild_id = ? AND status = 'active'").bind(guildId).first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM blacklists WHERE guild_id = ?").bind(guildId).first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE guild_id = ? AND occurred_at >= ?").bind(guildId, now() - 86400).first(),
+    ]);
+    return discordMessage(`📊 **Eternal Auth Stats**\nActive licenses: **${licenses?.n || 0}**\nBlacklisted: **${blacklisted?.n || 0}**\nExecutions (24h): **${execs?.n || 0}**`);
+  }
+
+  return discordMessage("Unknown Eternal Auth command.");
+}
+
+function panelComponents(panelId = null) {
+  const suffix = panelId ? `:${panelId}` : "";
+  return [
+    {
+      type: 1,
+      components: [
+        { type: 2, style: 3, label: "Redeem Key", custom_id: `eternal:redeem${suffix}`, emoji: { name: "🔑" } },
+        { type: 2, style: 1, label: "Get Script", custom_id: `eternal:get_script${suffix}`, emoji: { name: "📜" } },
+        { type: 2, style: 1, label: "Get Role", custom_id: `eternal:get_role${suffix}`, emoji: { name: "👤" } },
+        { type: 2, style: 2, label: "Reset HWID", custom_id: `eternal:reset_hwid${suffix}`, emoji: { name: "⚙️" } },
+        { type: 2, style: 2, label: "Get Stats", custom_id: `eternal:get_stats${suffix}`, emoji: { name: "📊" } },
+      ],
+    },
+  ];
+}
+
+async function handleDiscordComponent(interaction, env, ctx) {
+  const customId = interaction.data?.custom_id || "";
+  const parts = customId.split(":");
+  const action = parts[1] || "";
+  const panelId = parts[2] || null;
+  const guildId = interaction.guild_id;
+  const userId = interactionUserId(interaction);
+  if (!guildId || !userId) return discordMessage("This panel only works in a server.");
+  const guild = await getGuild(env, guildId);
+  if (!guild) return discordMessage("Eternal Auth is not configured in this server.");
+
+  if (action === "setpanel_project") {
+    const draftId = panelId;
+    const selectedScriptId = cleanText(interaction.data?.values?.[0], 128);
+    let draft = cacheGet(draftHotCache, draftId);
+    if (!draft || draft.guild_id !== guildId || draft.created_by !== userId || Number(draft.expires_at) <= now()) {
+      draft = await env.DB.prepare(
+        "SELECT * FROM panel_drafts WHERE id = ? AND guild_id = ? AND created_by = ? AND expires_at > ? LIMIT 1"
+      ).bind(draftId, guildId, userId, now()).first();
+      if (draft) cachePut(draftHotCache, draftId, draft, 15 * 60_000);
+    }
+    if (!draft) return discordMessage("That /setpanel setup expired. Run `/setpanel` again.");
+
+    let script = null;
+    const cachedScripts = cacheGet(scriptHotCache, `${guildId}:enabled`);
+    if (cachedScripts) script = cachedScripts.find((item) => item.id === selectedScriptId) || null;
+    if (!script) {
+      script = await env.DB.prepare(
+        "SELECT * FROM scripts WHERE id = ? AND guild_id = ? AND enabled = 1 LIMIT 1"
+      ).bind(selectedScriptId, guildId).first();
+    }
+    script = await ensureScriptLoaderId(env, script);
+    if (!script) return discordMessage("That project is no longer available.");
+
+    const loaderUrl = loaderUrlForScript(guild, script);
+    if (!loaderUrl) return discordMessage("Eternal Auth could not build this project's loader URL.");
+    const loaderTemplate = `script_key="{{KEY}}";\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
+    draft.selected_script_id = script.id;
+    draft.loader_template = loaderTemplate;
+    cachePut(draftHotCache, draftId, draft, 15 * 60_000);
+    // Persist for cross-isolate reliability, but cache makes the common next
+    // modal submit avoid another D1 read.
+    await env.DB.prepare(
+      "UPDATE panel_drafts SET selected_script_id = ?, loader_template = ? WHERE id = ?"
+    ).bind(script.id, loaderTemplate, draftId).run();
+
+    const defaultTitle = `${script.name || "Eternal Auth"} Control Panel`.slice(0, 256);
+    const defaultDescription = `This control panel is for the project: **${script.name || "Eternal Auth"}**\nIf you're a buyer, click on the buttons below to redeem your key, get the script or get your role`.slice(0, 4000);
+
+    return json({
+      type: 9,
+      data: {
+        custom_id: `eternal:setpanel_modal:${draftId}`,
+        title: "[3/3] Specify the panel message",
+        components: [
+          { type: 1, components: [{ type: 4, custom_id: "embed_title", style: 1, label: "Title of the embed", value: defaultTitle, required: true, min_length: 1, max_length: 256 }] },
+          { type: 1, components: [{ type: 4, custom_id: "embed_description", style: 2, label: "Description of the embed", value: defaultDescription, required: true, min_length: 1, max_length: 4000 }] },
+          { type: 1, components: [{ type: 4, custom_id: "embed_color", style: 1, label: "Color of the embed (hex)", value: "#db9509", required: true, min_length: 4, max_length: 7 }] },
+        ],
+      },
+    });
+  }
+
+  const panel = panelId ? await getPanel(env, guildId, panelId) : null;
+  if (panelId && !panel) return discordMessage("This Eternal Auth panel has been disabled or removed.");
+  const panelGuild = guildForPanel(guild, panel);
+
+  if (action === "redeem") {
+    return discordModal(`eternal:redeem_modal${panelId ? `:${panelId}` : ""}`, "Redeem Eternal Auth Key", "Redeem code", "ETERNAL-...");
+  }
+  if (action === "get_script") return sendOwnScript(env, panelGuild, userId, interaction, null, panel);
+  if (action === "script_select") {
+    const selectedScriptId = cleanText(interaction.data?.values?.[0], 128);
+    return sendOwnScript(env, panelGuild, userId, interaction, selectedScriptId, panel);
+  }
+  if (action === "reset_hwid") return resetOwnHwid(env, panelGuild, userId, ctx);
+  if (action === "get_role") {
+    const license = await findLicenseForDiscord(env, guildId, userId);
+    const valid = await validateLicense(env, license, null, false);
+    if (!valid.ok) return discordMessage(valid.error);
+    const ok = await addBuyerRole(env, panelGuild, userId);
+    return discordMessage(ok ? "✅ Your buyer role has been restored." : "Your access is valid, but I could not assign this panel's buyer role.");
+  }
+  if (action === "get_stats") {
+    const license = await findAnyLicenseForDiscord(env, guildId, userId);
+    const valid = await validateLicense(env, license, null, false);
+    if (!valid.ok) return discordMessage(valid.error);
+    const execs = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM executions WHERE guild_id = ? AND license_id = ?"
+    ).bind(guildId, license.id).first();
+    return discordMessage(`📊 **Your Eternal Auth Stats**\nStatus: **${license.status || "active"}**\nExpires: **${license.auth_expire === -1 ? "Lifetime" : new Date(Number(license.auth_expire) * 1000).toLocaleString()}**\nHWID: **${license.hwid_hash ? "Linked" : "Not linked"}**\nExecutions: **${execs?.n || 0}**`);
+  }
+  return discordMessage("Unknown panel action.");
+}
+
+async function handleDiscordModalSubmit(interaction, env, ctx) {
+  const guildId = interaction.guild_id;
+  const userId = interactionUserId(interaction);
+  if (!guildId || !userId) return discordMessage("This action only works in a server.");
+  const guild = await getGuild(env, guildId);
+  if (!guild) return discordMessage("Eternal Auth is not configured here.");
+
+  const customId = interaction.data?.custom_id || "";
+  const parts = customId.split(":");
+  const action = parts[1] || "";
+  const panelId = parts[2] || null;
+
+  if (action === "setpanel_modal") {
+    const draftId = panelId;
+    let draft = cacheGet(draftHotCache, draftId);
+    if (!draft || draft.guild_id !== guildId || draft.created_by !== userId || Number(draft.expires_at) <= now()) {
+      draft = await env.DB.prepare(
+        "SELECT * FROM panel_drafts WHERE id = ? AND guild_id = ? AND created_by = ? AND expires_at > ? LIMIT 1"
+      ).bind(draftId, guildId, userId, now()).first();
+      if (draft) cachePut(draftHotCache, draftId, draft, 15 * 60_000);
+    }
+    if (!draft) return discordMessage("That /setpanel setup expired. Run `/setpanel` again.");
+
+    const fields = {};
+    for (const row of interaction.data?.components || []) {
+      for (const component of row.components || []) {
+        if (component.custom_id) fields[component.custom_id] = component.value;
+      }
+    }
+
+    const embedTitle = cleanText(fields.embed_title, 256);
+    const embedDescription = cleanText(fields.embed_description, 4000);
+    const rawColor = String(fields.embed_color || "").trim();
+    if (!embedTitle || !embedDescription) return discordMessage("The panel title and description are required.");
+
+    let hex = rawColor.replace(/^#/, "");
+    if (/^[0-9a-f]{3}$/i.test(hex)) hex = hex.split("").map((c) => c + c).join("");
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return discordMessage("Use a valid hex color such as `#db9509`.");
+    const embedColor = parseInt(hex, 16);
+
+    let script = null;
+    if (draft.selected_script_id) {
+      const cachedScripts = cacheGet(scriptHotCache, `${guildId}:enabled`);
+      if (cachedScripts) script = cachedScripts.find((item) => item.id === draft.selected_script_id) || null;
+      if (!script) {
+        script = await env.DB.prepare(
+          "SELECT * FROM scripts WHERE id = ? AND guild_id = ? LIMIT 1"
+        ).bind(draft.selected_script_id, guildId).first();
+      }
+    }
+    if (!script) return discordMessage("The selected project is no longer available. Run `/setpanel` again.");
+
+    const panelIdFinal = crypto.randomUUID();
+    const timestamp = now();
+    const auditDetails = JSON.stringify({
+      channel_id: draft.channel_id || interaction.channel_id,
+      project: script.name,
+      script_id: script.id,
+      manager_role_id: draft.manager_role_id,
+      buyer_role_id: draft.buyer_role_id,
+      embed_title: embedTitle,
+      embed_color: `#${hex.toLowerCase()}`,
+    }).slice(0, 4000);
+
+    // One D1 round trip replaces four sequential ones. The panel record is
+    // committed before the Discord message is posted so button clicks are safe
+    // immediately after the message appears.
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO panels
+          (id, guild_id, name, channel_id, manager_role_id, buyer_role_id, loader_template, active, created_by, created_at, updated_at, embed_title, embed_description, embed_color, script_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        panelIdFinal, guildId, script.name || "Eternal Auth",
+        draft.channel_id || interaction.channel_id || null, draft.manager_role_id,
+        draft.buyer_role_id, draft.loader_template, userId, timestamp, timestamp,
+        embedTitle, embedDescription, embedColor, script.id,
+      ),
+      env.DB.prepare(
+        "UPDATE guilds SET loader_template = ?, manager_role_id = ?, buyer_role_id = ?, updated_at = ? WHERE guild_id = ?"
+      ).bind(draft.loader_template, draft.manager_role_id, draft.buyer_role_id, timestamp, guildId),
+      env.DB.prepare("DELETE FROM panel_drafts WHERE id = ?").bind(draftId),
+      env.DB.prepare(
+        "INSERT INTO audit_logs (guild_id, action, actor_id, target, details, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(guildId, "discord.setpanel", userId, panelIdFinal, auditDetails, timestamp),
+    ]);
+    cachePut(panelHotCache, `${guildId}:${panelIdFinal}`, {
+      id: panelIdFinal, guild_id: guildId, name: script.name || "Eternal Auth",
+      channel_id: draft.channel_id || interaction.channel_id || null,
+      manager_role_id: draft.manager_role_id, buyer_role_id: draft.buyer_role_id,
+      loader_template: draft.loader_template, active: 1, created_by: userId,
+      created_at: timestamp, updated_at: timestamp, embed_title: embedTitle,
+      embed_description: embedDescription, embed_color: embedColor, script_id: script.id,
+    });
+    cacheDelete(draftHotCache, draftId);
+    cacheDelete(guildHotCache, guildId);
+
+    const user = interaction.member?.user || interaction.user || {};
+    const sentBy = user.global_name || user.username || userId;
+    let footerIcon;
+    if (user.avatar) footerIcon = `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`;
+
+    const targetChannelId = draft.channel_id || interaction.channel_id || null;
+    if (!targetChannelId) {
+      return discordMessage("I could not determine which channel to send the panel to.");
+    }
+
+    const sentPanel = await discordApi(env, `/channels/${targetChannelId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        embeds: [{
+          title: embedTitle,
+          description: embedDescription,
+          color: embedColor,
+          footer: { text: `Sent by ${sentBy}`, ...(footerIcon ? { icon_url: footerIcon } : {}) },
+          timestamp: new Date(timestamp * 1000).toISOString(),
+        }],
+        components: panelComponents(panelIdFinal),
+        allowed_mentions: { parse: [] },
+      }),
+    });
+
+    if (!sentPanel?.id) {
+      return discordMessage("The panel was saved, but I could not send the panel message in this channel.");
+    }
+
+    ctx.waitUntil(
+      env.DB.prepare(
+        "UPDATE panels SET message_id = ?, channel_id = ?, updated_at = ? WHERE id = ?"
+      ).bind(sentPanel.id, targetChannelId, now(), panelIdFinal).run().catch(() => {})
+    );
+
+    return discordMessage(`✅ Panel created successfully.`, true);
+  }
+
+  const panel = panelId ? await getPanel(env, guildId, panelId) : null;
+  if (panelId && !panel) return discordMessage("This Eternal Auth panel has been disabled or removed.");
+  const panelGuild = guildForPanel(guild, panel);
+
+  if (action === "redeem_modal") {
+    const code = interaction.data.components?.[0]?.components?.[0]?.value;
+    return redeemForDiscord(env, panelGuild, userId, cleanText(code, 128), ctx);
+  }
+  return discordMessage("Unknown modal action.");
+}
+
+async function redeemForDiscord(env, guild, userId, rawCode, ctx) {
+  if (!rawCode) return discordMessage("Enter an Eternal Auth key.");
+  if (await isBlacklisted(env, guild.guild_id, userId)) return discordMessage("You are blacklisted from this Eternal Auth project.");
+  if (await findLicenseForDiscord(env, guild.guild_id, userId)) return discordMessage("You already have an active license.");
+
+  // Luarmor-style redeem: an unclaimed stock key becomes linked to the Discord user.
+  const stockLicense = await findLicenseByKey(env, rawCode);
+  if (stockLicense && stockLicense.guild_id === guild.guild_id) {
+    if (stockLicense.discord_id && stockLicense.discord_id !== userId) {
+      return discordMessage("That key is already linked to another Discord user.");
+    }
+    const valid = await validateLicense(env, stockLicense, null, false);
+    if (!valid.ok) return discordMessage(valid.error);
+    await env.DB.prepare("UPDATE licenses SET discord_id = ?, updated_at = ? WHERE id = ?")
+      .bind(userId, now(), stockLicense.id)
+      .run();
+    ctx.waitUntil(addBuyerRole(env, guild, userId));
+    await audit(env, guild.guild_id, "discord.redeem_stock_key", userId, stockLicense.id, {});
+    ctx.waitUntil(sendLog(env, guild, `🔑 <@${userId}> redeemed an Eternal Auth stock key.`));
+    return discordMessage(`✅ Key linked successfully. Use **Get Script** or \`/script\` to receive your loader.`);
+  }
+
+  // Optional coupon-style codes are supported too.
+  const codeHash = await sha256Hex(rawCode.toUpperCase());
+  const code = await env.DB.prepare("SELECT * FROM redeem_codes WHERE guild_id = ? AND code_hash = ? LIMIT 1")
+    .bind(guild.guild_id, codeHash)
+    .first();
+  if (!code || code.uses_left <= 0 || (code.expires_at !== -1 && code.expires_at <= now())) {
+    return discordMessage("That Eternal Auth key is invalid or expired.");
+  }
+
+  const license = await createLicense(env, {
+    guildId: guild.guild_id,
+    discordId: userId,
+    days: code.days,
+    note: code.note || "Redeemed code",
+  });
+
+  if (code.uses_left <= 1) {
+    await env.DB.prepare("DELETE FROM redeem_codes WHERE id = ?").bind(code.id).run();
+  } else {
+    await env.DB.prepare("UPDATE redeem_codes SET uses_left = uses_left - 1 WHERE id = ?").bind(code.id).run();
+  }
+
+  ctx.waitUntil(addBuyerRole(env, guild, userId));
+  await audit(env, guild.guild_id, "discord.redeem_code", userId, code.id, { days: code.days });
+  ctx.waitUntil(sendLog(env, guild, `🔑 <@${userId}> redeemed an Eternal Auth code.`));
+  return discordMessage(`✅ Redeemed successfully. Your key is \`${license.key}\`. Use **Get Script** or \`/script\` for your loader.`);
+}
+
+async function resetOwnHwid(env, guild, userId, ctx) {
+  const license = await findAnyLicenseForDiscord(env, guild.guild_id, userId);
+  const valid = await validateLicense(env, license, null, false);
+  if (!valid.ok) return discordMessage(valid.error);
+
+  const cooldown = hwidCooldownSeconds(env);
+  const last = Number(license.last_hwid_reset || 0);
+  if (last && now() - last < cooldown) {
+    const remaining = cooldown - (now() - last);
+    return discordMessage(`HWID reset is on cooldown. Try again in ${Math.ceil(remaining)} second(s).`);
+  }
+
+  const resetAt = now();
+  const reset = await env.DB.prepare("UPDATE licenses SET hwid_hash = NULL, last_hwid_reset = ?, updated_at = ? WHERE id = ? AND status = 'active' AND (last_hwid_reset IS NULL OR last_hwid_reset <= ?) AND NOT EXISTS (SELECT 1 FROM hwid_blacklists b WHERE b.guild_id = licenses.guild_id AND b.hwid_hash = licenses.hwid_hash)")
+    .bind(resetAt, resetAt, license.id, resetAt - cooldown).run();
+  if (!reset.meta?.changes) return discordMessage("HWID reset unavailable. Check your license or wait for the five-minute cooldown.");
+  await audit(env, guild.guild_id, "discord.resethwid", userId, userId, {});
+  ctx.waitUntil(sendLog(env, guild, `🔄 <@${userId}> reset their Eternal Auth HWID.`));
+  return discordMessage("✅ HWID reset. Your next successful authentication will link the new device.");
+}
+
+function extractLoaderUrl(value) {
+  const text = String(value || "").trim();
+  // Prefer the URL inside HttpGet(...), but accept a bare Eternal Auth loader URL too.
+  const httpGet = text.match(/HttpGet\s*\(\s*["'](https:\/\/[^"']+)["']\s*\)/i);
+  if (httpGet?.[1]) return httpGet[1];
+  const direct = text.match(/https:\/\/[^"')\s]+\/files\/v4\/loaders\/[a-f0-9]{32}\.lua(?:[?#][^"')\s]*)?/i);
+  return direct?.[0] || null;
+}
+
+function pinnedLoaderIdFromTemplate(template) {
+  const url = extractLoaderUrl(template);
+  if (!url) return null;
+  try {
+    const match = new URL(url).pathname.match(/^\/files\/v4\/loaders\/([a-f0-9]{32})\.lua$/i);
+    return match?.[1]?.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function sendOwnScript(env, guild, userId, interaction, selectedScriptId = null, panel = null) {
+  const license = await findAnyLicenseForDiscord(env, guild.guild_id, userId);
+  const valid = await validateLicense(env, license, null, false);
+  if (!valid.ok) return discordMessage(valid.error);
+
+  const scripts = await getScriptsForGuild(env, guild.guild_id, true);
+  if (!scripts.length) return discordMessage("There are no enabled Eternal Auth scripts in this project.");
+
+  // A /setpanel loader pins that panel to one specific Eternal Auth script.
+  // The guild-level template is the latest panel default, so /script also uses
+  // that pinned loader instead of opening a selector when one is available.
+  if (!selectedScriptId) {
+    const pinnedLoaderId = pinnedLoaderIdFromTemplate(panel?.loader_template || guild.loader_template);
+    if (pinnedLoaderId) {
+      const pinnedScript = scripts.find((row) => String(row.loader_id || "").toLowerCase() === pinnedLoaderId);
+      if (pinnedScript) selectedScriptId = pinnedScript.id;
+    }
+  }
+
+  if (!selectedScriptId && scripts.length > 1) {
+    const options = scripts.slice(0, 25).map((script) => ({
+      label: String(script.name || "Eternal Auth Script").slice(0, 100),
+      value: script.id,
+      description: `Version ${String(script.version || "1.0.0").slice(0, 80)}`,
+    }));
+    return discordMessage("Select which script you want:", true, [{
+      type: 1,
+      components: [{
+        type: 3,
+        custom_id: `eternal:script_select${panel?.id ? `:${panel.id}` : ""}`,
+        placeholder: "Select a script",
+        min_values: 1,
+        max_values: 1,
+        options,
+      }],
+    }]);
+  }
+
+  const script = selectedScriptId
+    ? scripts.find((row) => row.id === selectedScriptId)
+    : scripts[0];
+  if (!script) return discordMessage("That Eternal Auth script is unavailable or disabled.");
+
+  const key = await deriveLicenseKey(env, license.id);
+  const loaderUrl = loaderUrlForScript(guild, script);
+  if (!loaderUrl) return discordMessage("Eternal Auth could not build this script's loader URL yet.");
+
+  const readyLoader = buildLoader(panel?.loader_template || guild.loader_template || defaultLoaderTemplate(), key, guild, script);
+  return discordMessage(`**${script.name}** • v${script.version}
+
+Here is your script:
+\`\`\`lua
+${readyLoader}
+\`\`\``);
+}
+
+async function sendFfaScript(env, guild, requestedName = null) {
+  const scripts = (await getScriptsForGuild(env, guild.guild_id, true)).filter((row) => !!row.ffa_enabled);
+  if (!scripts.length) return discordMessage("There are no FFA scripts enabled in this project.");
+
+  let script = null;
+  if (requestedName) {
+    const target = String(requestedName).trim().toLowerCase();
+    script = scripts.find((row) => String(row.name || "").toLowerCase() === target) || null;
+    if (!script) return discordMessage(`FFA script not found. Available: ${scripts.map((row) => `\`${row.name}\``).join(", ")}`);
+  } else if (scripts.length === 1) {
+    script = scripts[0];
+  } else {
+    return discordMessage(`Choose one with \`/ffa script:<name>\`. Available: ${scripts.map((row) => `\`${row.name}\``).join(", ")}`);
+  }
+
+  const loaderUrl = ffaLoaderUrlForScript(guild, script);
+  if (!loaderUrl) return discordMessage("Eternal Auth could not build this FFA loader URL yet.");
+  return discordMessage(`**${script.name}** • v${script.version} • FFA
+
+No key is required:
+\`\`\`lua
+${ffaLauncher(loaderUrl)}
+\`\`\``);
+}
+
+
+function defaultLoaderTemplate() {
+  return `script_key = "{{KEY}}"\nloadstring(game:HttpGet("{{LOADER_URL}}"))()`;
+}
+
+function buildLoader(template, key, guild, script = null) {
+  const loaderUrl = script
+    ? (loaderUrlForScript(guild, script) || `${String(guild?.base_url || "https://YOUR-WORKER.workers.dev").replace(/\/$/, "")}/files/v4/loaders/LOADER_ID.lua`)
+    : (loaderUrlForGuild(guild) || `${String(guild?.base_url || "https://YOUR-WORKER.workers.dev").replace(/\/$/, "")}/files/v4/loaders/LOADER_ID.lua`);
+  // Stored templates are retained in D1; generated launchers now use the required credential handshake.
+  return authenticatedLauncher(loaderUrl, key);
+}
+
+async function discordApi(env, path, options = {}) {
+  if (!env.DISCORD_BOT_TOKEN) return null;
+  const headers = new Headers(options.headers || {});
+  headers.set("authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
+  if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  const response = await fetch(`https://discord.com/api/v10${path}`, { ...options, headers });
+  if (!response.ok) {
+    console.error("Discord API error", response.status, await response.text());
+    return null;
+  }
+  if (response.status === 204) return true;
+  return response.json();
+}
+
+async function addBuyerRole(env, guild, userId) {
+  if (!guild?.buyer_role_id) return false;
+  return !!(await discordApi(env, `/guilds/${guild.guild_id}/members/${userId}/roles/${guild.buyer_role_id}`, { method: "PUT" }));
+}
+
+async function removeBuyerRole(env, guild, userId) {
+  if (!guild?.buyer_role_id) return false;
+  return !!(await discordApi(env, `/guilds/${guild.guild_id}/members/${userId}/roles/${guild.buyer_role_id}`, { method: "DELETE" }));
+}
+
+async function dmLoader(env, guild, userId, key, origin) {
+  const dm = await discordApi(env, "/users/@me/channels", {
+    method: "POST",
+    body: JSON.stringify({ recipient_id: userId }),
+  });
+  if (!dm?.id) return false;
+
+  const scripts = await getScriptsForGuild(env, guild.guild_id, true);
+  let content;
+  if (scripts.length === 1) {
+    const loader = buildLoader(guild.loader_template || defaultLoaderTemplate(), key, guild, scripts[0]);
+    content = loader.length <= 1800
+      ? `You were whitelisted for **Eternal Auth**.
+
+**${scripts[0].name}**
+
+\`\`\`lua
+${loader}
+\`\`\``
+      : `You were whitelisted for **Eternal Auth**. Your key is \`${key}\`. Use \`/script\` in the server to retrieve your loader.`;
+  } else {
+    content = `You were whitelisted for **Eternal Auth**. Your key is \`${key}\`. This project has **${scripts.length}** scripts. Use \`/script\` or **Get Script** to choose one.`;
+  }
+
+  return !!(await discordApi(env, `/channels/${dm.id}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+  }));
+}
+
+async function sendLog(env, guild, message) {
+  if (!guild?.log_webhook_enc) return false;
+  try {
+    const webhook = await decryptConfigSecret(env, guild.log_webhook_enc);
+    const response = await fetch(webhook, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: "Eternal Auth",
+        content: message,
+        allowed_mentions: { parse: [] },
+      }),
+    });
+    return response.ok;
+  } catch (error) {
+    console.error("Eternal Auth log webhook error", error);
+    return false;
+  }
+}
+
+async function fetchGuildMembersWithRole(env, guildId, roleId) {
+  const out = [];
+  let after = "0";
+  for (let page = 0; page < 5; page++) {
+    const query = new URLSearchParams({ limit: "1000", after });
+    const members = await discordApi(env, `/guilds/${guildId}/members?${query.toString()}`, { method: "GET" });
+    if (!Array.isArray(members)) break;
+    for (const member of members) {
+      if ((member.roles || []).includes(roleId)) out.push(member);
+    }
+    if (members.length < 1000) break;
+    after = members[members.length - 1]?.user?.id || after;
+  }
+  return out;
+}

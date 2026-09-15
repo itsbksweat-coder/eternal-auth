@@ -1,0 +1,29 @@
+{
+  "name": "eternal-auth",
+  "version": "1.8.8",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute eternal-auth-db --remote --file=./schema.sql",
+    "commands": "node ./scripts/register-commands.mjs",
+    "deploy:first": "wrangler deploy --secrets-file .secrets",
+    "db:migrate:v1.2": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.2-server-keys.sql",
+    "gateway:tail": "wrangler tail eternal-auth",
+    "db:migrate:v1.6": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.6-multi-scripts.sql",
+    "db:migrate:v1.7": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.7-backend-persistence.sql",
+    "db:migrate:v1.8": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8-multi-panels.sql",
+    "db:migrate:v1.8.6": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.4-panel-customization.sql",
+    "check": "node --check src/index.js && node --check src/dm-responder.js && node --check src/device-security.js && node --check public/app.js && node --test tests/*.test.mjs",
+    "db:migrate:v1.8.7": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.7-device-security.sql",
+    "db:migrate:v1.8.8": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.8-ffa.sql",
+    "deploy:upgrade": "node scripts/deploy-upgrade.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.124.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

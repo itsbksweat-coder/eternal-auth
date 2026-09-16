@@ -48,23 +48,23 @@
         </article>
       </div>
 
-      <article id="confirmOneCard" class="card panel-card hidden">
+      <article id="confirmOneCard" class="card panel-card">
         <span class="eyebrow">CONFIRMATION 1 OF 2</span>
         <h3>Confirm the server ID</h3>
-        <p class="muted">Type the same server ID again to make sure the correct server is selected.</p>
+        <p class="muted">After pressing Continue above, type the same server ID again.</p>
         <div class="stack compact">
-          <input id="confirmGuildId" inputmode="numeric" autocomplete="off" placeholder="Re-enter Discord Server ID" />
-          <button id="confirmOneBtn" class="primary" type="button">Continue to Final Confirmation</button>
+          <input id="confirmGuildId" inputmode="numeric" autocomplete="off" placeholder="Re-enter Discord Server ID" disabled />
+          <button id="confirmOneBtn" class="primary" type="button" disabled>Continue to Final Confirmation</button>
         </div>
       </article>
 
-      <article id="confirmTwoCard" class="card panel-card hidden">
+      <article id="confirmTwoCard" class="card panel-card">
         <span class="eyebrow">CONFIRMATION 2 OF 2</span>
         <h3>Final confirmation</h3>
-        <p class="muted">This action starts immediately. Type <code>BAN ALL</code> exactly, then press the red button.</p>
+        <p class="muted">After confirmation 1 passes, type <code>BAN ALL</code> exactly.</p>
         <div class="stack compact">
-          <input id="confirmation" autocomplete="off" placeholder="Type BAN ALL" />
-          <button id="executeBtn" class="danger" type="button">Ban Everyone It Can</button>
+          <input id="confirmation" autocomplete="off" placeholder="Type BAN ALL" disabled />
+          <button id="executeBtn" class="danger" type="button" disabled>Ban Everyone It Can</button>
         </div>
       </article>
 
@@ -84,6 +84,7 @@
   <script type="module">
     const $ = (s) => document.querySelector(s);
     let selectedGuild = "";
+    let firstConfirmed = false;
 
     function message(text = "", type = "") {
       const el = $("#statusMsg");
@@ -117,10 +118,13 @@
 
     function resetConfirmations() {
       selectedGuild = "";
+      firstConfirmed = false;
       $("#confirmGuildId").value = "";
       $("#confirmation").value = "";
-      $("#confirmOneCard").classList.add("hidden");
-      $("#confirmTwoCard").classList.add("hidden");
+      $("#confirmGuildId").disabled = true;
+      $("#confirmOneBtn").disabled = true;
+      $("#confirmation").disabled = true;
+      $("#executeBtn").disabled = true;
     }
 
     $("#backBtn").onclick = () => { location.href = "/"; };
@@ -147,11 +151,14 @@
       if (!/^\d{5,25}$/.test(guildId)) return message("Enter a valid Discord server ID.", "error");
 
       selectedGuild = guildId;
+      firstConfirmed = false;
       $("#confirmGuildId").value = "";
       $("#confirmation").value = "";
-      $("#confirmOneCard").classList.remove("hidden");
-      $("#confirmTwoCard").classList.add("hidden");
-      message("First confirmation ready.");
+      $("#confirmGuildId").disabled = false;
+      $("#confirmOneBtn").disabled = false;
+      $("#confirmation").disabled = true;
+      $("#executeBtn").disabled = true;
+      message("Server selected. Complete confirmation 1.");
       $("#confirmGuildId").focus();
     };
 
@@ -160,15 +167,17 @@
       const typedGuild = $("#confirmGuildId").value.trim();
       if (typedGuild !== selectedGuild) return message("The server IDs do not match.", "error");
 
-      $("#confirmTwoCard").classList.remove("hidden");
+      firstConfirmed = true;
       $("#confirmation").value = "";
-      message("Server ID confirmed. Complete the final confirmation.");
+      $("#confirmation").disabled = false;
+      $("#executeBtn").disabled = false;
+      message("Confirmation 1 passed. Complete the final confirmation.");
       $("#confirmation").focus();
     };
 
     $("#executeBtn").onclick = async () => {
       if (!selectedGuild) return message("Choose the server first.", "error");
-      if ($("#confirmGuildId").value.trim() !== selectedGuild) return message("Complete confirmation 1 again.", "error");
+      if (!firstConfirmed || $("#confirmGuildId").value.trim() !== selectedGuild) return message("Complete confirmation 1 first.", "error");
 
       const confirmation = $("#confirmation").value.trim();
       if (confirmation.toUpperCase() !== "BAN ALL") return message("Type BAN ALL exactly first.", "error");
@@ -192,9 +201,9 @@
       } catch (error) {
         message(error.message, "error");
       } finally {
-        $("#executeBtn").disabled = false;
         $("#startBtn").disabled = false;
         $("#confirmOneBtn").disabled = false;
+        $("#executeBtn").disabled = false;
       }
     };
 

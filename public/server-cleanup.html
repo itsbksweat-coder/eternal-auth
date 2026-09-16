@@ -46,7 +46,7 @@
         <article class="card panel-card">
           <span class="eyebrow">TARGET SERVER</span>
           <h3>Ban all</h3>
-          <p class="muted">Choose a server Eternal Auth is currently in. The dropdown shows the server name followed by its server ID.</p>
+          <p class="muted">Choose a server Eternal Auth is currently connected to through Discord. The dropdown shows the server name followed by its server ID.</p>
           <div class="stack compact">
             <select id="guildId" disabled>
               <option value="">Loading Eternal Auth servers…</option>
@@ -75,7 +75,7 @@
           <div class="info-tile"><span>Your Discord ID</span><strong>1167590082878902435</strong></div>
           <div class="info-tile"><span>Eternal Auth</span><strong>Excluded</strong></div>
           <div class="info-tile"><span>Server owner</span><strong>Excluded</strong></div>
-          <div class="info-tile"><span>Server Members Intent</span><strong>Required</strong></div>
+          <div class="info-tile"><span>Server Members Intent</span><strong>Required for cleanup</strong></div>
         </div>
       </article>
 
@@ -108,6 +108,12 @@
       }[c]));
     }
 
+    function permissionLabel(value) {
+      if (value === true) return "Yes";
+      if (value === false) return "Missing";
+      return "Unknown";
+    }
+
     async function api(path, options = {}) {
       const res = await fetch(path, {
         ...options,
@@ -133,14 +139,15 @@
       $("#selectedServerName").textContent = guild?.name || "None selected";
       $("#selectedServerId").textContent = guild?.id || "—";
       $("#selectedMemberCount").textContent = guild ? (guild.approximate_member_count || "—") : "—";
-      $("#banPermission").textContent = guild ? (guild.ban_members ? "Yes" : "Missing") : "—";
-      $("#managePermission").textContent = guild ? (guild.manage_server ? "Yes" : "Missing") : "—";
+      $("#banPermission").textContent = guild ? permissionLabel(guild.ban_members) : "—";
+      $("#managePermission").textContent = guild ? permissionLabel(guild.manage_server) : "—";
       $("#banAllBtn").disabled = !guild;
     }
 
     async function loadServers(showMessage = true) {
       try {
-        if (showMessage) message("Loading Eternal Auth servers…");
+        if (showMessage) message("Checking the servers Eternal Auth is connected to…");
+
         const [serverData, stateData] = await Promise.all([
           api("/api/admin/server-cleanup/guilds"),
           api("/api/admin/state").catch(() => ({ state: {} })),
@@ -148,18 +155,28 @@
 
         guilds = Array.isArray(serverData.guilds) ? serverData.guilds : [];
         const select = $("#guildId");
+        $("#gatewayStatus").textContent = serverData.gateway_ready === true
+          ? "Online"
+          : (serverData.gateway_ready === false ? "Connecting" : "—");
 
         if (!guilds.length) {
-          select.innerHTML = '<option value="">Eternal Auth is not in any servers</option>';
+          select.innerHTML = '<option value="">No connected servers found</option>';
           select.disabled = true;
           renderSelectedGuild();
-          return message("No Discord servers were returned for Eternal Auth.", "error");
+          return message(
+            serverData.message || "The Discord Gateway did not return any servers for Eternal Auth. Press Reconnect Gateway, wait a few seconds, then Refresh Servers.",
+            "error"
+          );
         }
 
         select.innerHTML = '<option value="">Choose a server…</option>' + guilds.map((guild) => {
-          const permissionText = guild.can_bulk_ban ? "" : " • missing ban/manage perms";
+          let permissionText = "";
+          if (guild.can_bulk_ban === false) permissionText = " • missing ban/manage perms";
+          else if (guild.can_bulk_ban == null) permissionText = " • permissions not verified";
+
           return `<option value="${esc(guild.id)}">${esc(guild.name)} — ${esc(guild.id)}${permissionText}</option>`;
         }).join("");
+
         select.disabled = false;
 
         const saved = String(stateData.state?.last_guild_id || "");
@@ -167,7 +184,7 @@
         else if (guilds.length === 1) select.value = guilds[0].id;
 
         renderSelectedGuild();
-        if (showMessage) message(`Loaded ${guilds.length} server(s).`, "success");
+        if (showMessage) message(`Found ${guilds.length} server(s) Eternal Auth is in.`, "success");
       } catch (error) {
         guilds = [];
         $("#guildId").innerHTML = '<option value="">Could not load servers</option>';
@@ -184,21 +201,33 @@
 
     $("#reconnectBtn").onclick = async () => {
       try {
+        $("#reconnectBtn").disabled = true;
         message("Reconnecting Eternal Auth Gateway…");
         const data = await api("/api/admin/gateway/reconnect-now", { method: "POST", body: "{}" });
         const ready = !!data.gateway?.gateway_ready;
         $("#gatewayStatus").textContent = ready ? "Online" : "Connecting";
-        message(ready ? "Gateway reconnected and is online." : "Gateway reconnect started.", ready ? "success" : "");
+
+        if (!ready) {
+          message("Gateway reconnect started. Waiting for Discord READY…");
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+        }
+
+        await loadServers(true);
       } catch (error) {
         $("#gatewayStatus").textContent = "Error";
         message(error.message, "error");
+      } finally {
+        $("#reconnectBtn").disabled = false;
       }
     };
 
     $("#banAllBtn").onclick = async () => {
       const guild = selectedGuild();
       if (!guild) return message("Choose a server first.", "error");
-      if (!guild.can_bulk_ban) {
+
+      // Only block when Discord permission calculation definitively says no.
+      // If it is unknown, let the request run and show Discord's real response.
+      if (guild.can_bulk_ban === false) {
         return message("Eternal Auth is missing Ban Members and/or Manage Server in that server. Give the bot those server permissions, move its role high enough, then press Refresh Servers.", "error");
       }
 

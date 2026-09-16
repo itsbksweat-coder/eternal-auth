@@ -5,6 +5,11 @@ const ADMINISTRATOR = 1n << 3n;
 const BAN_MEMBERS = 1n << 2n;
 const MANAGE_GUILD = 1n << 5n;
 
+const PINNED_GUILDS = {
+  "1249019782632570971": "WakeHub",
+  "1539142072232050690": "CleanHub",
+};
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -21,16 +26,13 @@ function sleep(ms) {
 
 // Keep the existing EternalGateway connection, but expose the guild IDs it
 // receives from Discord's READY/GUILD_CREATE/GUILD_DELETE gateway events.
-// This is the authoritative list of servers the BOT is actually in.
 export class EternalGateway extends BaseEternalGateway {
   async fetch(request) {
     const url = new URL(request.url);
 
     if (url.pathname === "/guilds" && request.method === "GET") {
-      // Wake the existing Discord gateway if needed.
       await super.fetch(new Request("https://gateway.internal/status", { method: "GET" }));
 
-      // A freshly started socket may need a moment to receive READY.
       for (let i = 0; i < 50 && !this.ready; i += 1) {
         await sleep(100);
       }
@@ -64,7 +66,7 @@ async function dashboardAdminAuthorized(request, env, ctx) {
 function discordHeaders(env) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-Dashboard/2.0",
+    "user-agent": "EternalAuth-Dashboard/2.1",
   };
 }
 
@@ -99,7 +101,7 @@ function effectivePermissions(guild, member) {
   return permissions;
 }
 
-async function loadGuild(env, guildId, botUserId) {
+async function loadGuild(env, guildId, botUserId, fallbackName = null) {
   const guildResponse = await fetch(`${DISCORD_API}/guilds/${encodeURIComponent(guildId)}?with_counts=true`, {
     headers: discordHeaders(env),
   });
@@ -107,13 +109,15 @@ async function loadGuild(env, guildId, botUserId) {
   if (!guildResponse.ok) {
     return {
       id: String(guildId),
-      name: String(guildId),
+      name: String(fallbackName || guildId),
       approximate_member_count: 0,
       administrator: null,
       ban_members: null,
       manage_server: null,
       can_bulk_ban: null,
       permission_check: "unknown",
+      accessible: false,
+      discord_status: guildResponse.status,
     };
   }
 
@@ -141,13 +145,14 @@ async function loadGuild(env, guildId, botUserId) {
 
   return {
     id: String(guild.id || guildId),
-    name: String(guild.name || guildId),
+    name: String(guild.name || fallbackName || guildId),
     approximate_member_count: Number(guild.approximate_member_count || guild.approximate_presence_count || 0),
     administrator,
     ban_members: banMembers,
     manage_server: manageGuild,
     can_bulk_ban: permissions === null ? null : (banMembers && manageGuild),
     permission_check: permissions === null ? "unknown" : "known",
+    accessible: true,
   };
 }
 
@@ -156,30 +161,34 @@ async function listBotGuilds(env) {
     return json({ ok: false, error: "DISCORD_BOT_TOKEN is not configured." }, 500);
   }
 
-  const discovered = await gatewayGuildIds(env);
-
-  if (!discovered.ids.length) {
-    return json({
-      ok: true,
-      guilds: [],
-      source: "discord_gateway",
-      gateway_ready: discovered.gatewayReady,
-      gateway: discovered.gateway,
-      message: discovered.gatewayReady
-        ? "Discord Gateway is online but returned no guild IDs."
-        : "Discord Gateway has not reached READY yet. Press Reconnect Gateway, wait a few seconds, then refresh servers.",
-    });
+  let discovered = { ids: [], gateway: {}, gatewayReady: false };
+  try {
+    discovered = await gatewayGuildIds(env);
+  } catch (error) {
+    discovered = {
+      ids: [],
+      gateway: { error: String(error?.message || error) },
+      gatewayReady: false,
+    };
   }
+
+  // Always include the two known Eternal Auth servers as a fallback. Discord
+  // REST is still queried for each ID so names, counts and permissions stay live.
+  const allIds = [...new Set([
+    ...discovered.ids.map(String),
+    ...Object.keys(PINNED_GUILDS),
+  ])];
 
   const meResponse = await fetch(`${DISCORD_API}/users/@me`, { headers: discordHeaders(env) });
   const me = meResponse.ok ? await meResponse.json().catch(() => ({})) : {};
   const botUserId = String(me?.id || "");
 
   const guilds = [];
-  // Small batches avoid bursting Discord's REST API if the bot is in many servers.
-  for (let i = 0; i < discovered.ids.length; i += 10) {
-    const batch = discovered.ids.slice(i, i + 10);
-    const rows = await Promise.all(batch.map((guildId) => loadGuild(env, guildId, botUserId)));
+  for (let i = 0; i < allIds.length; i += 10) {
+    const batch = allIds.slice(i, i + 10);
+    const rows = await Promise.all(batch.map((guildId) =>
+      loadGuild(env, guildId, botUserId, PINNED_GUILDS[guildId] || null)
+    ));
     guilds.push(...rows);
   }
 
@@ -188,9 +197,11 @@ async function listBotGuilds(env) {
   return json({
     ok: true,
     guilds,
-    source: "discord_gateway",
+    source: discovered.ids.length ? "discord_gateway+pinned" : "pinned_fallback",
     gateway_ready: discovered.gatewayReady,
     gateway_count: discovered.ids.length,
+    pinned_count: Object.keys(PINNED_GUILDS).length,
+    gateway: discovered.gateway,
   });
 }
 

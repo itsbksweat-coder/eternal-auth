@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#121b36" />
+  <title>Eternal Auth • Server Cleanup</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-backdrop"></div>
+  <main class="page-wrap">
+    <section class="content-area">
+      <header class="content-topbar card">
+        <div>
+          <p class="crumb">Eternal Auth / Server Cleanup</p>
+          <h1>Server Cleanup</h1>
+        </div>
+        <div class="toolbar-actions">
+          <button id="backBtn" class="ghost" type="button">Back to Dashboard</button>
+          <button id="reconnectBtn" class="primary" type="button">Reconnect Gateway</button>
+        </div>
+      </header>
+
+      <div id="statusMsg" class="msg"></div>
+
+      <div class="grid two">
+        <article class="card panel-card">
+          <span class="eyebrow">TARGET SERVER</span>
+          <h3>Preview cleanup</h3>
+          <p class="muted">Enter the Discord server ID. Eternal Auth will list members and show how many accounts it can submit to Discord's bulk-ban endpoint.</p>
+          <div class="stack compact">
+            <input id="guildId" inputmode="numeric" autocomplete="off" placeholder="Discord Server ID" />
+            <button id="previewBtn" class="primary" type="button">Preview Members</button>
+          </div>
+        </article>
+
+        <article class="card panel-card accent-card">
+          <span class="eyebrow">PROTECTED ACCOUNTS</span>
+          <h3>Always kept</h3>
+          <p class="muted">Cleanup never targets your owner account, the Discord server owner, or Eternal Auth itself.</p>
+          <div class="info-grid">
+            <div class="info-tile"><span>Your Discord ID</span><strong>1167590082878902435</strong></div>
+            <div class="info-tile"><span>Bot</span><strong id="botId">—</strong></div>
+            <div class="info-tile"><span>Server owner</span><strong id="serverOwnerId">—</strong></div>
+            <div class="info-tile"><span>Targets</span><strong id="targetCount">—</strong></div>
+          </div>
+        </article>
+      </div>
+
+      <article id="confirmCard" class="card panel-card hidden">
+        <span class="eyebrow">CONFIRM CLEANUP</span>
+        <h3 id="guildName">Server</h3>
+        <p class="muted">This action is immediate. Type <code>BAN ALL</code> exactly, then press the red button.</p>
+        <div class="stack compact">
+          <input id="confirmation" autocomplete="off" placeholder="Type BAN ALL" />
+          <button id="executeBtn" class="danger" type="button">Ban Previewed Members</button>
+        </div>
+      </article>
+
+      <article class="card panel-card">
+        <span class="eyebrow">RESULT</span>
+        <h3>Last cleanup result</h3>
+        <div class="info-grid">
+          <div class="info-tile"><span>Attempted</span><strong id="attempted">—</strong></div>
+          <div class="info-tile"><span>Banned</span><strong id="banned">—</strong></div>
+          <div class="info-tile"><span>Failed / unbannable</span><strong id="failed">—</strong></div>
+          <div class="info-tile"><span>Gateway</span><strong id="gatewayStatus">—</strong></div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script type="module">
+    const $ = (s) => document.querySelector(s);
+    let previewedGuild = "";
+
+    function message(text = "", type = "") {
+      const el = $("#statusMsg");
+      el.textContent = text;
+      el.className = `msg ${type}`;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: { "content-type": "application/json", ...(options.headers || {}) },
+      });
+      let data;
+      try { data = await res.json(); }
+      catch { data = { ok: false, error: `HTTP ${res.status}` }; }
+      if (res.status === 401) {
+        location.href = "/";
+        throw new Error("Sign in to Eternal Auth first.");
+      }
+      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    async function loadSavedGuild() {
+      try {
+        const data = await api("/api/admin/state");
+        const saved = String(data.state?.last_guild_id || "");
+        if (saved) $("#guildId").value = saved;
+      } catch {}
+    }
+
+    $("#backBtn").onclick = () => { location.href = "/"; };
+
+    $("#reconnectBtn").onclick = async () => {
+      try {
+        message("Reconnecting Eternal Auth Gateway…");
+        const data = await api("/api/admin/gateway/reconnect-now", { method: "POST", body: "{}" });
+        const ready = !!data.gateway?.gateway_ready;
+        $("#gatewayStatus").textContent = ready ? "Online" : "Connecting";
+        message(ready ? "Gateway reconnected and is online." : "Gateway reconnect started.", ready ? "success" : "");
+      } catch (error) {
+        $("#gatewayStatus").textContent = "Error";
+        message(error.message, "error");
+      }
+    };
+
+    $("#previewBtn").onclick = async () => {
+      const guildId = $("#guildId").value.trim();
+      if (!/^\d{5,25}$/.test(guildId)) return message("Enter a valid Discord server ID.", "error");
+      try {
+        message("Loading server members…");
+        const data = await api(`/api/admin/server-cleanup/preview?guild_id=${encodeURIComponent(guildId)}`);
+        previewedGuild = guildId;
+        $("#guildName").textContent = data.guild_name || guildId;
+        $("#targetCount").textContent = data.target_count ?? 0;
+        $("#botId").textContent = data.bot_user_id || "—";
+        $("#serverOwnerId").textContent = data.server_owner_id || "—";
+        $("#confirmCard").classList.remove("hidden");
+        $("#confirmation").value = "";
+        message(`Preview ready: ${data.target_count ?? 0} member(s) can be submitted for cleanup.`, "success");
+      } catch (error) {
+        previewedGuild = "";
+        $("#confirmCard").classList.add("hidden");
+        message(error.message, "error");
+      }
+    };
+
+    $("#executeBtn").onclick = async () => {
+      if (!previewedGuild) return message("Preview the server first.", "error");
+      const confirmation = $("#confirmation").value.trim();
+      if (confirmation.toUpperCase() !== "BAN ALL") return message("Type BAN ALL exactly first.", "error");
+      if (!confirm(`Clean ${$("#guildName").textContent}? This starts immediately.`)) return;
+
+      try {
+        $("#executeBtn").disabled = true;
+        message("Submitting cleanup to Discord…");
+        const data = await api("/api/admin/server-cleanup", {
+          method: "POST",
+          body: JSON.stringify({ guild_id: previewedGuild, confirmation }),
+        });
+        $("#attempted").textContent = data.attempted ?? 0;
+        $("#banned").textContent = data.banned ?? 0;
+        $("#failed").textContent = data.failed ?? 0;
+        $("#confirmation").value = "";
+        message(`Cleanup finished for ${data.guild_name || previewedGuild}. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
+      } catch (error) {
+        message(error.message, "error");
+      } finally {
+        $("#executeBtn").disabled = false;
+      }
+    };
+
+    loadSavedGuild();
+  </script>
+</body>
+</html>

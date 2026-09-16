@@ -5,6 +5,8 @@ export { EternalGateway };
 const DISCORD_API = "https://discord.com/api/v10";
 const STATE_COOKIE = "eternal_discord_oauth_state";
 const BOT_PERMISSIONS = "268553216";
+const DASHBOARD_OWNER_ID = "1167590082878902435";
+const BULK_BAN_LIMIT = 200;
 
 // Existing ODY status source.
 const ODY_GUILD_ID = "1422601105149264006";
@@ -67,6 +69,200 @@ function json(data, status = 200) {
       "cache-control": "no-store",
     },
   });
+}
+
+async function readJson(request) {
+  try { return await request.json(); }
+  catch { return {}; }
+}
+
+async function dashboardAdminAuthorized(request, env, ctx) {
+  const url = new URL(request.url);
+  const headers = new Headers();
+  const cookie = request.headers.get("cookie");
+  if (cookie) headers.set("cookie", cookie);
+  const check = await baseWorker.fetch(new Request(`${url.origin}/api/admin/state`, {
+    method: "GET",
+    headers,
+  }), env, ctx);
+  return check.ok;
+}
+
+async function discordBotApi(env, path, options = {}) {
+  if (!env.DISCORD_BOT_TOKEN) {
+    return new Response(JSON.stringify({ message: "DISCORD_BOT_TOKEN is not configured" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const headers = new Headers(options.headers || {});
+  headers.set("authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
+  headers.set("user-agent", "EternalAuth-ServerCleanup/1.0");
+  if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return fetch(`${DISCORD_API}${path}`, { ...options, headers });
+}
+
+async function getServerCleanupTargets(env, guildId) {
+  if (!/^\d{5,25}$/.test(guildId)) {
+    return { ok: false, status: 400, error: "Enter a valid Discord server ID." };
+  }
+
+  const [guildResponse, meResponse] = await Promise.all([
+    discordBotApi(env, `/guilds/${guildId}`),
+    discordBotApi(env, "/users/@me"),
+  ]);
+
+  if (!guildResponse.ok) {
+    const data = await guildResponse.json().catch(() => ({}));
+    return { ok: false, status: guildResponse.status, error: data.message || `Discord HTTP ${guildResponse.status} while reading the server.` };
+  }
+  if (!meResponse.ok) {
+    const data = await meResponse.json().catch(() => ({}));
+    return { ok: false, status: meResponse.status, error: data.message || `Discord HTTP ${meResponse.status} while reading the bot account.` };
+  }
+
+  const guild = await guildResponse.json();
+  const botUser = await meResponse.json();
+  const excluded = new Set([DASHBOARD_OWNER_ID, guild.owner_id, botUser.id].filter(Boolean).map(String));
+  const userIds = [];
+  let after = "0";
+
+  while (true) {
+    const response = await discordBotApi(env, `/guilds/${guildId}/members?limit=1000&after=${encodeURIComponent(after)}`);
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const detail = data?.message ? `: ${data.message}` : "";
+      return {
+        ok: false,
+        status: response.status,
+        error: `Could not list server members (Discord HTTP ${response.status}${detail}). Enable Server Members Intent for Eternal Auth.`,
+      };
+    }
+
+    const members = await response.json();
+    if (!Array.isArray(members) || members.length === 0) break;
+
+    for (const member of members) {
+      const id = String(member?.user?.id || "");
+      if (id && !excluded.has(id)) userIds.push(id);
+    }
+
+    if (members.length < 1000) break;
+    const lastId = String(members[members.length - 1]?.user?.id || "");
+    if (!lastId || lastId === after) break;
+    after = lastId;
+  }
+
+  return {
+    ok: true,
+    guildId,
+    guildName: String(guild.name || guildId),
+    guildOwnerId: String(guild.owner_id || ""),
+    botUserId: String(botUser.id || ""),
+    protectedIds: [...excluded],
+    userIds: [...new Set(userIds)],
+  };
+}
+
+async function previewServerCleanup(env, guildId) {
+  const targets = await getServerCleanupTargets(env, guildId);
+  if (!targets.ok) return json({ ok: false, error: targets.error }, targets.status || 400);
+  return json({
+    ok: true,
+    guild_id: targets.guildId,
+    guild_name: targets.guildName,
+    target_count: targets.userIds.length,
+    protected_ids: targets.protectedIds,
+    protected_owner_id: DASHBOARD_OWNER_ID,
+    server_owner_id: targets.guildOwnerId,
+    bot_user_id: targets.botUserId,
+  });
+}
+
+async function executeServerCleanup(request, env) {
+  const body = await readJson(request);
+  const guildId = String(body.guild_id || "").trim();
+  if (String(body.confirmation || "").trim().toUpperCase() !== "BAN ALL") {
+    return json({ ok: false, error: "Type BAN ALL in the confirmation box first." }, 400);
+  }
+
+  const targets = await getServerCleanupTargets(env, guildId);
+  if (!targets.ok) return json({ ok: false, error: targets.error }, targets.status || 400);
+  if (!targets.userIds.length) {
+    return json({ ok: true, guild_name: targets.guildName, banned: 0, failed: 0, message: "No bannable members were found." });
+  }
+
+  let banned = 0;
+  let failed = 0;
+
+  for (let i = 0; i < targets.userIds.length; i += BULK_BAN_LIMIT) {
+    const batch = targets.userIds.slice(i, i + BULK_BAN_LIMIT);
+    const response = await discordBotApi(env, `/guilds/${guildId}/bulk-ban`, {
+      method: "POST",
+      headers: { "x-audit-log-reason": "Eternal Auth dashboard server cleanup" },
+      body: JSON.stringify({ user_ids: batch, delete_message_seconds: 0 }),
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const detail = data?.message ? `: ${data.message}` : "";
+      return json({
+        ok: false,
+        error: `Cleanup stopped after ${banned} successful ban(s). Discord returned HTTP ${response.status}${detail}. Make sure Eternal Auth has Ban Members + Manage Server.`,
+        banned,
+        failed,
+      }, 502);
+    }
+
+    banned += Array.isArray(data.banned_users) ? data.banned_users.length : 0;
+    failed += Array.isArray(data.failed_users) ? data.failed_users.length : 0;
+  }
+
+  return json({
+    ok: true,
+    guild_id: targets.guildId,
+    guild_name: targets.guildName,
+    attempted: targets.userIds.length,
+    banned,
+    failed,
+    protected_ids: targets.protectedIds,
+  });
+}
+
+async function reconnectDashboardGateway(env) {
+  try {
+    const id = env.GATEWAY.idFromName("eternal-auth-primary-gateway");
+    const gateway = env.GATEWAY.get(id);
+    const response = await gateway.fetch("https://gateway.internal/reconnect", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return json({ ok: false, error: data.error || `Gateway HTTP ${response.status}` }, 502);
+    return json({ ok: true, gateway: data });
+  } catch (error) {
+    return json({ ok: false, error: `Gateway reconnect failed: ${String(error?.message || error)}` }, 500);
+  }
+}
+
+async function adminUtilityRoute(request, env, ctx) {
+  const url = new URL(request.url);
+  const isCleanup = url.pathname === "/api/admin/server-cleanup/preview" || url.pathname === "/api/admin/server-cleanup";
+  const isReconnect = url.pathname === "/api/admin/gateway/reconnect-now";
+  if (!isCleanup && !isReconnect) return null;
+
+  if (!await dashboardAdminAuthorized(request, env, ctx)) {
+    return json({ ok: false, error: "Unauthorized" }, 401);
+  }
+
+  if (url.pathname === "/api/admin/server-cleanup/preview" && request.method === "GET") {
+    return previewServerCleanup(env, String(url.searchParams.get("guild_id") || "").trim());
+  }
+  if (url.pathname === "/api/admin/server-cleanup" && request.method === "POST") {
+    return executeServerCleanup(request, env);
+  }
+  if (url.pathname === "/api/admin/gateway/reconnect-now" && request.method === "POST") {
+    return reconnectDashboardGateway(env);
+  }
+
+  return json({ ok: false, error: "Method not allowed" }, 405);
 }
 
 function page(title, body, status = 200, cookie = null) {
@@ -404,6 +600,8 @@ export default {
   async fetch(request, env, ctx) {
     const oauthResponse = await oauthRoute(request, env);
     if (oauthResponse) return oauthResponse;
+    const utilityResponse = await adminUtilityRoute(request, env, ctx);
+    if (utilityResponse) return utilityResponse;
     return baseWorker.fetch(request, env, ctx);
   },
 

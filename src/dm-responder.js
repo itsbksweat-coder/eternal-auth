@@ -59,8 +59,8 @@ export class DmResponder {
       else if (/^(?:status|ping)$/.test(text)) content = 'Eternal Auth’s Discord connection is online and receiving DMs. This checks the bot connection only; license and database status are checked when you use your server’s panel.';
 
       return await this.sendMessage(message.channel_id, content);
-    } catch (error) {
-      this.lastError = String(error?.message || error || 'Discord DM request failed');
+    } catch {
+      this.lastError = 'Discord DM request failed';
       return false;
     } finally {
       this.pending--;

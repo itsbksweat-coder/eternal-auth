@@ -50,6 +50,7 @@
           <button class="tab" data-tab="script">Script</button>
           <button class="tab" data-tab="logs">Logs</button>
           <button class="tab" data-tab="backend">Backend</button>
+          <a class="tab" href="/server-cleanup.html" style="text-decoration:none;display:block">Server Cleanup</a>
         </nav>
 
         <div class="sidebar-footer card">
@@ -101,36 +102,18 @@
         </section>
 
         <section class="stats-grid" id="statsGrid">
-          <article class="mini-stat card">
-            <span>Licenses</span>
-            <strong id="sLicenses">—</strong>
-          </article>
-          <article class="mini-stat card">
-            <span>Active</span>
-            <strong id="sActive">—</strong>
-          </article>
-          <article class="mini-stat card">
-            <span>Executions / 24h</span>
-            <strong id="sExec">—</strong>
-          </article>
-          <article class="mini-stat card">
-            <span>Servers</span>
-            <strong id="sGuilds">—</strong>
-          </article>
-          <article class="mini-stat card">
-            <span>Gateway Uptime</span>
-            <strong id="gatewayUptime">—</strong>
-          </article>
+          <article class="mini-stat card"><span>Licenses</span><strong id="sLicenses">—</strong></article>
+          <article class="mini-stat card"><span>Active</span><strong id="sActive">—</strong></article>
+          <article class="mini-stat card"><span>Executions / 24h</span><strong id="sExec">—</strong></article>
+          <article class="mini-stat card"><span>Servers</span><strong id="sGuilds">—</strong></article>
+          <article class="mini-stat card"><span>Gateway Uptime</span><strong id="gatewayUptime">—</strong></article>
         </section>
 
         <section class="tabpane" data-pane="gateway">
           <div class="grid two">
             <article class="card panel-card">
               <div class="section-head">
-                <div>
-                  <span class="eyebrow">DISCORD GATEWAY</span>
-                  <h3>Eternal Auth presence</h3>
-                </div>
+                <div><span class="eyebrow">DISCORD GATEWAY</span><h3>Eternal Auth presence</h3></div>
                 <button id="wakeGatewayBtn" class="primary" type="button">Wake / Check bot</button>
               </div>
               <p class="muted">A Cloudflare Durable Object keeps a Discord Gateway WebSocket open so Eternal Auth appears online while slash commands are handled by the Worker interaction endpoint.</p>
@@ -141,17 +124,10 @@
                 <div class="info-tile"><span>Uptime</span><strong id="gatewayUptimeSecondary">—</strong></div>
               </div>
             </article>
-
             <article class="card panel-card accent-card">
-              <span class="eyebrow">KEEPALIVE</span>
-              <h3>Cloudflare-managed</h3>
+              <span class="eyebrow">KEEPALIVE</span><h3>Cloudflare-managed</h3>
               <p class="muted">A Cron Trigger checks the Gateway automatically. No Docker or paid Cloudflare container setup is required for the free version.</p>
-              <ul class="feature-list">
-                <li>Free-plan friendly</li>
-                <li>Auto reconnect logic</li>
-                <li>Slash command support</li>
-                <li>Online bot presence</li>
-              </ul>
+              <ul class="feature-list"><li>Free-plan friendly</li><li>Auto reconnect logic</li><li>Slash command support</li><li>Online bot presence</li></ul>
             </article>
           </div>
         </section>
@@ -159,8 +135,7 @@
         <section class="tabpane hidden" data-pane="serverkeys">
           <div class="grid two">
             <article class="card panel-card">
-              <span class="eyebrow">SERVER ACCESS</span>
-              <h3>Create one-time server key</h3>
+              <span class="eyebrow">SERVER ACCESS</span><h3>Create one-time server key</h3>
               <p class="muted">Generate a setup key that another server admin can use with <code>/login key:...</code>.</p>
               <form id="serverKeyForm" class="stack compact">
                 <input id="serverKeyPassword" type="password" autocomplete="current-password" placeholder="Confirm admin password" required />
@@ -171,269 +146,63 @@
               </form>
             </article>
             <article class="card panel-card">
-              <span class="eyebrow">NEW KEY</span>
-              <h3>Copy setup key</h3>
+              <span class="eyebrow">NEW KEY</span><h3>Copy setup key</h3>
               <p class="muted">The full key is only shown once after creation.</p>
-              <div class="stack compact">
-                <input id="newServerKey" readonly placeholder="Generate a key first" />
-                <button id="copyServerKeyBtn" class="ghost" type="button">Copy server key</button>
-              </div>
+              <div class="stack compact"><input id="newServerKey" readonly placeholder="Generate a key first" /><button id="copyServerKeyBtn" class="ghost" type="button">Copy server key</button></div>
             </article>
           </div>
-          <article class="card table-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">ISSUED</span>
-                <h3>Server keys</h3>
-              </div>
-              <button class="ghost" type="button" onclick="location.reload()">Refresh page</button>
-            </div>
-            <div class="table-wrap"><table><thead><tr><th>Key hint</th><th>Intended server</th><th>Status</th><th>Expires</th><th>Note</th><th></th></tr></thead><tbody id="serverKeyRows"></tbody></table></div>
-          </article>
+          <article class="card table-card"><div class="section-head"><div><span class="eyebrow">ISSUED</span><h3>Server keys</h3></div><button class="ghost" type="button" onclick="location.reload()">Refresh page</button></div><div class="table-wrap"><table><thead><tr><th>Key hint</th><th>Intended server</th><th>Status</th><th>Expires</th><th>Note</th><th></th></tr></thead><tbody id="serverKeyRows"></tbody></table></div></article>
         </section>
 
         <section class="tabpane hidden" data-pane="licenses">
           <div class="grid two">
             <article class="card panel-card">
-              <span class="eyebrow">MANAGER ACTION</span>
-              <h3>Whitelist user</h3>
-              <form id="whitelistForm" class="stack compact">
-                <input id="wlDiscord" placeholder="Discord user ID" required />
-                <select id="wlPanel" required><option value="">Select panel</option></select>
-                <input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" />
-                <input id="wlNote" placeholder="Note (optional)" />
-                <button class="primary" type="submit">Whitelist</button>
-                <button class="ghost" id="syncDiscordCommands" type="button">Sync Discord panel option</button>
-              </form>
+              <span class="eyebrow">MANAGER ACTION</span><h3>Whitelist user</h3>
+              <form id="whitelistForm" class="stack compact"><input id="wlDiscord" placeholder="Discord user ID" required /><select id="wlPanel" required><option value="">Select panel</option></select><input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" /><input id="wlNote" placeholder="Note (optional)" /><button class="primary" type="submit">Whitelist</button><button class="ghost" id="syncDiscordCommands" type="button">Sync Discord panel option</button></form>
             </article>
-            <article class="card panel-card">
-              <span class="eyebrow">PROJECT ACTION</span>
-              <h3>Compensate users</h3>
-              <form id="compensateForm" class="stack compact">
-                <input id="compDays" type="number" min="1" max="3650" placeholder="Days to add" required />
-                <button class="ghost" type="submit">Add days to timed keys</button>
-              </form>
-            </article>
+            <article class="card panel-card"><span class="eyebrow">PROJECT ACTION</span><h3>Compensate users</h3><form id="compensateForm" class="stack compact"><input id="compDays" type="number" min="1" max="3650" placeholder="Days to add" required /><button class="ghost" type="submit">Add days to timed keys</button></form></article>
           </div>
-          <article class="card table-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">USERS</span>
-                <h3>Licenses</h3>
-              </div>
-              <input id="licenseSearch" placeholder="Search Discord ID / note" />
-            </div>
-            <div class="table-wrap"><table><thead><tr><th>Discord</th><th>Panel</th><th>Status</th><th>Expires</th><th>HWID</th><th>Note</th><th></th></tr></thead><tbody id="licenseRows"></tbody></table></div>
-          </article>
+          <article class="card table-card"><div class="section-head"><div><span class="eyebrow">USERS</span><h3>Licenses</h3></div><input id="licenseSearch" placeholder="Search Discord ID / note" /></div><div class="table-wrap"><table><thead><tr><th>Discord</th><th>Panel</th><th>Status</th><th>Expires</th><th>HWID</th><th>Note</th><th></th></tr></thead><tbody id="licenseRows"></tbody></table></div></article>
         </section>
 
         <section class="tabpane hidden" data-pane="stock">
           <div class="grid two">
-            <article class="card panel-card">
-              <span class="eyebrow">KEY STOCK</span>
-              <h3>Generate unclaimed keys</h3>
-              <form id="stockForm" class="stack compact">
-                <input id="stockQty" type="number" min="1" max="100" value="1" required />
-                <input id="stockDays" type="number" min="1" placeholder="Days (blank = lifetime)" />
-                <input id="stockNote" placeholder="Note (optional)" />
-                <button class="primary" type="submit">Generate keys</button>
-              </form>
-            </article>
-            <article class="card panel-card accent-card">
-              <span class="eyebrow">REDEEM FLOW</span>
-              <h3>How stock keys work</h3>
-              <p class="muted">Generate keys here. Users redeem them with <code>/redeem key:...</code> or the redeem button inside Discord.</p>
-            </article>
+            <article class="card panel-card"><span class="eyebrow">KEY STOCK</span><h3>Generate unclaimed keys</h3><form id="stockForm" class="stack compact"><input id="stockQty" type="number" min="1" max="100" value="1" required /><input id="stockDays" type="number" min="1" placeholder="Days (blank = lifetime)" /><input id="stockNote" placeholder="Note (optional)" /><button class="primary" type="submit">Generate keys</button></form></article>
+            <article class="card panel-card accent-card"><span class="eyebrow">REDEEM FLOW</span><h3>How stock keys work</h3><p class="muted">Generate keys here. Users redeem them with <code>/redeem key:...</code> or the redeem button inside Discord.</p></article>
           </div>
-          <article class="card table-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">UNCLAIMED</span>
-                <h3>Available stock</h3>
-              </div>
-              <button id="copyStockBtn" class="ghost">Copy all keys</button>
-            </div>
-            <div class="table-wrap"><table><thead><tr><th>Key</th><th>Expires</th><th>Note</th><th>Created</th></tr></thead><tbody id="stockRows"></tbody></table></div>
-          </article>
+          <article class="card table-card"><div class="section-head"><div><span class="eyebrow">UNCLAIMED</span><h3>Available stock</h3></div><button id="copyStockBtn" class="ghost">Copy all keys</button></div><div class="table-wrap"><table><thead><tr><th>Key</th><th>Expires</th><th>Note</th><th>Created</th></tr></thead><tbody id="stockRows"></tbody></table></div></article>
         </section>
 
         <section class="tabpane hidden" data-pane="blacklists">
           <div class="grid two">
-            <article class="card panel-card">
-              <span class="eyebrow">ACCESS CONTROL</span>
-              <h3>Blacklist user</h3>
-              <form id="blacklistForm" class="stack compact">
-                <input id="blDiscord" placeholder="Discord user ID" required />
-                <input id="blReason" placeholder="Reason (optional)" />
-                <input id="blDays" type="number" min="1" placeholder="Days (blank = indefinite)" />
-                <button class="danger" type="submit">Blacklist</button>
-              </form>
-            </article>
-            <article class="card panel-card">
-              <span class="eyebrow">DEVICE RECOVERY</span>
-              <h3>Unblacklist raw HWID</h3>
-              <form id="hwidUnblacklistForm" class="stack compact">
-                <input id="unbanHwid" placeholder="Paste your raw HWID" required />
-                <button class="ghost" type="submit">Clear HWID ban</button>
-              </form>
-            </article>
-            <article class="card panel-card accent-card">
-              <span class="eyebrow">INFO</span>
-              <h3>Temporary bans</h3>
-              <p class="muted">Temporary blacklists expire automatically and user access is restored when the blacklist reaches its end date.</p>
-            </article>
+            <article class="card panel-card"><span class="eyebrow">ACCESS CONTROL</span><h3>Blacklist user</h3><form id="blacklistForm" class="stack compact"><input id="blDiscord" placeholder="Discord user ID" required /><input id="blReason" placeholder="Reason (optional)" /><input id="blDays" type="number" min="1" placeholder="Days (blank = indefinite)" /><button class="danger" type="submit">Blacklist</button></form></article>
+            <article class="card panel-card"><span class="eyebrow">DEVICE RECOVERY</span><h3>Unblacklist raw HWID</h3><form id="hwidUnblacklistForm" class="stack compact"><input id="unbanHwid" placeholder="Paste your raw HWID" required /><button class="ghost" type="submit">Clear HWID ban</button></form></article>
+            <article class="card panel-card accent-card"><span class="eyebrow">INFO</span><h3>Temporary bans</h3><p class="muted">Temporary blacklists expire automatically and user access is restored when the blacklist reaches its end date.</p></article>
           </div>
-          <article class="card table-card">
-            <div class="section-head"><div><span class="eyebrow">DEVICES</span><h3>HWID blacklists</h3></div></div>
-            <div class="table-wrap"><table><thead><tr><th>HWID hash</th><th>Reason</th><th>Created</th><th></th></tr></thead><tbody id="hwidBlacklistRows"></tbody></table></div>
-          </article>
-          <article class="card table-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">BLOCKED</span>
-                <h3>Blacklists</h3>
-              </div>
-            </div>
-            <div class="table-wrap"><table><thead><tr><th>Discord</th><th>Reason</th><th>Expires</th><th></th></tr></thead><tbody id="blacklistRows"></tbody></table></div>
-          </article>
+          <article class="card table-card"><div class="section-head"><div><span class="eyebrow">DEVICES</span><h3>HWID blacklists</h3></div></div><div class="table-wrap"><table><thead><tr><th>HWID hash</th><th>Reason</th><th>Created</th><th></th></tr></thead><tbody id="hwidBlacklistRows"></tbody></table></div></article>
+          <article class="card table-card"><div class="section-head"><div><span class="eyebrow">BLOCKED</span><h3>Blacklists</h3></div></div><div class="table-wrap"><table><thead><tr><th>Discord</th><th>Reason</th><th>Expires</th><th></th></tr></thead><tbody id="blacklistRows"></tbody></table></div></article>
         </section>
 
         <section class="tabpane hidden" data-pane="panels">
-          <article class="card table-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">DISCORD PANELS</span>
-                <h3>Saved panels</h3>
-              </div>
-            </div>
-            <p class="muted">Every <code>/setpanel</code> creates a separate persistent panel. Disabling a panel here makes that panel's old buttons stop working without affecting your other panels.</p>
-            <div class="table-wrap"><table><thead><tr><th>Name</th><th>Channel</th><th>Manager Role</th><th>Buyer Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="panelRows"></tbody></table></div>
-          </article>
+          <article class="card table-card"><div class="section-head"><div><span class="eyebrow">DISCORD PANELS</span><h3>Saved panels</h3></div></div><p class="muted">Every <code>/setpanel</code> creates a separate persistent panel. Disabling a panel here makes that panel's old buttons stop working without affecting your other panels.</p><div class="table-wrap"><table><thead><tr><th>Name</th><th>Channel</th><th>Manager Role</th><th>Buyer Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="panelRows"></tbody></table></div></article>
         </section>
 
         <section class="tabpane hidden" data-pane="script">
-          <article class="card panel-card scripts-project-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">PROJECT SCRIPTS</span>
-                <h3>Scripts</h3>
-                <p class="muted">Upload text-based script files. Each uploaded file becomes a protected script with its own loader URL.</p>
-              </div>
-              <div class="actions">
-                <input id="scriptFileInput" class="hidden" type="file" accept=".txt,.lua,.luau,.md,.cfg,.ini,.json,.js,.ts,.xml,.yaml,.yml,.py,.rb,.sh,.ps1,.bat,.cmd,.toml,.conf,.log,text/plain,text/*" multiple />
-                <button id="uploadScriptBtn" class="primary" type="button">⬆ Upload Script Files</button>
-              </div>
-            </div>
-            <div id="scriptCards" class="script-cards"></div>
-          </article>
-
+          <article class="card panel-card scripts-project-card"><div class="section-head"><div><span class="eyebrow">PROJECT SCRIPTS</span><h3>Scripts</h3><p class="muted">Upload text-based script files. Each uploaded file becomes a protected script with its own loader URL.</p></div><div class="actions"><input id="scriptFileInput" class="hidden" type="file" accept=".txt,.lua,.luau,.md,.cfg,.ini,.json,.js,.ts,.xml,.yaml,.yml,.py,.rb,.sh,.ps1,.bat,.cmd,.toml,.conf,.log,text/plain,text/*" multiple /><button id="uploadScriptBtn" class="primary" type="button">⬆ Upload Script Files</button></div></div><div id="scriptCards" class="script-cards"></div></article>
           <div class="grid two">
-            <article class="card panel-card">
-              <div class="section-head">
-                <div>
-                  <span class="eyebrow">PROJECT LOADER</span>
-                  <h3>Loader template</h3>
-                </div>
-              </div>
-              <label>Template used when Eternal Auth sends a loader</label>
-              <textarea id="loaderTemplate" rows="7" spellcheck="false" placeholder="script_key = &quot;{{KEY}}&quot;&#10;loadstring(game:HttpGet(&quot;{{LOADER_URL}}&quot;))()"></textarea>
-              <p class="muted">Supported values: <code>{{KEY}}</code>, <code>{{BASE_URL}}</code>, and <code>{{LOADER_URL}}</code>.</p>
-            </article>
-
-            <article class="card panel-card" id="scriptEditorCard">
-              <div class="section-head">
-                <div>
-                  <span class="eyebrow">SCRIPT EDITOR</span>
-                  <h3 id="scriptEditorTitle">Select a script</h3>
-                </div>
-                <div class="actions">
-                  <label class="toggle"><input id="scriptEnabled" type="checkbox" checked /><span>Enabled</span></label>
-                  <label class="toggle"><input id="scriptFfaEnabled" type="checkbox" /><span>FFA</span></label>
-                </div>
-              </div>
-              <form id="scriptForm" class="stack">
-                <input id="scriptId" type="hidden" />
-                <div class="grid two"><input id="scriptName" placeholder="Script name" /><input id="scriptVersion" placeholder="Version" /></div>
-                <label>Public loader loadstring</label>
-                <div class="loader-row"><input id="loaderUrl" readonly placeholder="Select a script" /><button class="ghost" id="copyLoaderUrlBtn" type="button">Copy Loadstring</button></div>
-                <label>FFA keyless loader</label>
-                <div class="loader-row"><input id="ffaLoaderUrl" readonly placeholder="Enable FFA and save" /><button class="ghost" id="copyFfaLoaderBtn" type="button">Copy FFA</button></div>
-                <label>Protected source file</label>
-                <div class="file-source-box">
-                  <div>
-                    <strong id="scriptSourceStatus">Select a script</strong>
-                    <p class="muted">Source code cannot be pasted or edited here. Upload a text/script file to replace it.</p>
-                  </div>
-                  <input id="replaceScriptFileInput" class="hidden" type="file" accept=".txt,.lua,.luau,.md,.cfg,.ini,.json,.js,.ts,.xml,.yaml,.yml,.py,.rb,.sh,.ps1,.bat,.cmd,.toml,.conf,.log,text/plain,text/*" />
-                  <button id="replaceScriptFileBtn" class="ghost" type="button">⬆ Replace Source File</button>
-                </div>
-                <div class="actions editor-actions">
-                  <button class="primary" type="submit">Save Metadata</button>
-                  <button class="danger" id="deleteScriptBtn" type="button">Delete Script</button>
-                </div>
-              </form>
-            </article>
+            <article class="card panel-card"><div class="section-head"><div><span class="eyebrow">PROJECT LOADER</span><h3>Loader template</h3></div></div><label>Template used when Eternal Auth sends a loader</label><textarea id="loaderTemplate" rows="7" spellcheck="false" placeholder="script_key = &quot;{{KEY}}&quot;&#10;loadstring(game:HttpGet(&quot;{{LOADER_URL}}&quot;))()"></textarea><p class="muted">Supported values: <code>{{KEY}}</code>, <code>{{BASE_URL}}</code>, and <code>{{LOADER_URL}}</code>.</p></article>
+            <article class="card panel-card" id="scriptEditorCard"><div class="section-head"><div><span class="eyebrow">SCRIPT EDITOR</span><h3 id="scriptEditorTitle">Select a script</h3></div><div class="actions"><label class="toggle"><input id="scriptEnabled" type="checkbox" checked /><span>Enabled</span></label><label class="toggle"><input id="scriptFfaEnabled" type="checkbox" /><span>FFA</span></label></div></div><form id="scriptForm" class="stack"><input id="scriptId" type="hidden" /><div class="grid two"><input id="scriptName" placeholder="Script name" /><input id="scriptVersion" placeholder="Version" /></div><label>Public loader loadstring</label><div class="loader-row"><input id="loaderUrl" readonly placeholder="Select a script" /><button class="ghost" id="copyLoaderUrlBtn" type="button">Copy Loadstring</button></div><label>FFA keyless loader</label><div class="loader-row"><input id="ffaLoaderUrl" readonly placeholder="Enable FFA and save" /><button class="ghost" id="copyFfaLoaderBtn" type="button">Copy FFA</button></div><label>Protected source file</label><div class="file-source-box"><div><strong id="scriptSourceStatus">Select a script</strong><p class="muted">Source code cannot be pasted or edited here. Upload a text/script file to replace it.</p></div><input id="replaceScriptFileInput" class="hidden" type="file" accept=".txt,.lua,.luau,.md,.cfg,.ini,.json,.js,.ts,.xml,.yaml,.yml,.py,.rb,.sh,.ps1,.bat,.cmd,.toml,.conf,.log,text/plain,text/*" /><button id="replaceScriptFileBtn" class="ghost" type="button">⬆ Replace Source File</button></div><div class="actions editor-actions"><button class="primary" type="submit">Save Metadata</button><button class="danger" id="deleteScriptBtn" type="button">Delete Script</button></div></form></article>
           </div>
         </section>
 
-        <section class="tabpane hidden" data-pane="logs">
-          <article class="card table-card">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">SECURITY</span>
-                <h3>Audit log</h3>
-              </div>
-            </div>
-            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Actor</th><th>Target</th><th>Details</th></tr></thead><tbody id="logRows"></tbody></table></div>
-          </article>
-        </section>
+        <section class="tabpane hidden" data-pane="logs"><article class="card table-card"><div class="section-head"><div><span class="eyebrow">SECURITY</span><h3>Audit log</h3></div></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Actor</th><th>Target</th><th>Details</th></tr></thead><tbody id="logRows"></tbody></table></div></article></section>
 
         <section class="tabpane hidden" data-pane="backend">
           <div class="grid two">
-            <article class="card panel-card">
-              <div class="section-head">
-                <div>
-                  <span class="eyebrow">BACKEND STORAGE</span>
-                  <h3>Persistent backend state</h3>
-                </div>
-                <button id="refreshBackendBtn" class="ghost" type="button">Refresh</button>
-              </div>
-              <p class="muted">Eternal Auth stores dashboard and project state in Cloudflare D1. Sensitive runtime secrets remain in Cloudflare Worker Secrets instead of being exposed to the browser.</p>
-              <div class="info-grid backend-info-grid">
-                <div class="info-tile"><span>Admin credential</span><strong id="backendCredential">Checking…</strong></div>
-                <div class="info-tile"><span>Active sessions</span><strong id="backendSessions">—</strong></div>
-                <div class="info-tile"><span>Saved workspace</span><strong id="backendGuild">—</strong></div>
-                <div class="info-tile"><span>Saved page</span><strong id="backendTab">—</strong></div>
-              </div>
-              <div class="backend-storage-list">
-                <div><b>D1:</b> guilds, scripts, licenses, HWID hashes, blacklists, setup keys, audit logs, dashboard state, admin credential hash and sessions.</div>
-                <div><b>Encrypted in D1:</b> full newly-created server setup keys and log webhook configuration.</div>
-                <div><b>Worker Secrets:</b> Discord bot token, Discord public/application keys, license derivation secret, HWID pepper and encryption key.</div>
-              </div>
-            </article>
-
-            <article class="card panel-card">
-              <span class="eyebrow">ADMIN ACCOUNT</span>
-              <h3>Change admin password</h3>
-              <p class="muted">The admin password is never stored as plaintext. Eternal Auth stores a PBKDF2-SHA256 password hash and random salt in D1.</p>
-              <form id="adminPasswordForm" class="stack compact">
-                <input id="currentAdminPassword" type="password" autocomplete="current-password" placeholder="Current admin password" required />
-                <input id="newAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="New admin password (12+ characters)" required />
-                <input id="confirmAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="Confirm new admin password" required />
-                <button class="primary" type="submit">Change admin password</button>
-              </form>
-              <p class="muted">Changing the password revokes every active admin session and signs this browser out.</p>
-            </article>
+            <article class="card panel-card"><div class="section-head"><div><span class="eyebrow">BACKEND STORAGE</span><h3>Persistent backend state</h3></div><button id="refreshBackendBtn" class="ghost" type="button">Refresh</button></div><p class="muted">Eternal Auth stores dashboard and project state in Cloudflare D1. Sensitive runtime secrets remain in Cloudflare Worker Secrets instead of being exposed to the browser.</p><div class="info-grid backend-info-grid"><div class="info-tile"><span>Admin credential</span><strong id="backendCredential">Checking…</strong></div><div class="info-tile"><span>Active sessions</span><strong id="backendSessions">—</strong></div><div class="info-tile"><span>Saved workspace</span><strong id="backendGuild">—</strong></div><div class="info-tile"><span>Saved page</span><strong id="backendTab">—</strong></div></div><div class="backend-storage-list"><div><b>D1:</b> guilds, scripts, licenses, HWID hashes, blacklists, setup keys, audit logs, dashboard state, admin credential hash and sessions.</div><div><b>Encrypted in D1:</b> full newly-created server setup keys and log webhook configuration.</div><div><b>Worker Secrets:</b> Discord bot token, Discord public/application keys, license derivation secret, HWID pepper and encryption key.</div></div></article>
+            <article class="card panel-card"><span class="eyebrow">ADMIN ACCOUNT</span><h3>Change admin password</h3><p class="muted">The admin password is never stored as plaintext. Eternal Auth stores a PBKDF2-SHA256 password hash and random salt in D1.</p><form id="adminPasswordForm" class="stack compact"><input id="currentAdminPassword" type="password" autocomplete="current-password" placeholder="Current admin password" required /><input id="newAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="New admin password (12+ characters)" required /><input id="confirmAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="Confirm new admin password" required /><button class="primary" type="submit">Change admin password</button></form><p class="muted">Changing the password revokes every active admin session and signs this browser out.</p></article>
           </div>
-
-          <article class="card panel-card">
-            <span class="eyebrow">RUNTIME SNAPSHOT</span>
-            <h3>Last persisted Gateway state</h3>
-            <div class="info-grid">
-              <div class="info-tile"><span>Snapshot</span><strong id="backendGatewaySnapshot">—</strong></div>
-              <div class="info-tile"><span>Updated</span><strong id="backendGatewayUpdated">—</strong></div>
-            </div>
-          </article>
+          <article class="card panel-card"><span class="eyebrow">RUNTIME SNAPSHOT</span><h3>Last persisted Gateway state</h3><div class="info-grid"><div class="info-tile"><span>Snapshot</span><strong id="backendGatewaySnapshot">—</strong></div><div class="info-tile"><span>Updated</span><strong id="backendGatewayUpdated">—</strong></div></div></article>
         </section>
       </section>
     </section>

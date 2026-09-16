@@ -27,11 +27,11 @@
       <div class="grid two">
         <article class="card panel-card">
           <span class="eyebrow">TARGET SERVER</span>
-          <h3>Preview cleanup</h3>
-          <p class="muted">Enter the Discord server ID. Eternal Auth will list members and show how many accounts it can submit to Discord's bulk-ban endpoint.</p>
+          <h3>Choose server</h3>
+          <p class="muted">Enter the Discord server ID, then continue through both confirmations.</p>
           <div class="stack compact">
             <input id="guildId" inputmode="numeric" autocomplete="off" placeholder="Discord Server ID" />
-            <button id="previewBtn" class="primary" type="button">Preview Members</button>
+            <button id="startBtn" class="primary" type="button">Continue</button>
           </div>
         </article>
 
@@ -41,20 +41,30 @@
           <p class="muted">Cleanup never targets your owner account, the Discord server owner, or Eternal Auth itself.</p>
           <div class="info-grid">
             <div class="info-tile"><span>Your Discord ID</span><strong>1167590082878902435</strong></div>
-            <div class="info-tile"><span>Bot</span><strong id="botId">—</strong></div>
-            <div class="info-tile"><span>Server owner</span><strong id="serverOwnerId">—</strong></div>
-            <div class="info-tile"><span>Targets</span><strong id="targetCount">—</strong></div>
+            <div class="info-tile"><span>Eternal Auth</span><strong>Excluded</strong></div>
+            <div class="info-tile"><span>Server owner</span><strong>Excluded</strong></div>
+            <div class="info-tile"><span>Targets</span><strong>Calculated when run</strong></div>
           </div>
         </article>
       </div>
 
-      <article id="confirmCard" class="card panel-card hidden">
-        <span class="eyebrow">CONFIRM CLEANUP</span>
-        <h3 id="guildName">Server</h3>
-        <p class="muted">This action is immediate. Type <code>BAN ALL</code> exactly, then press the red button.</p>
+      <article id="confirmOneCard" class="card panel-card hidden">
+        <span class="eyebrow">CONFIRMATION 1 OF 2</span>
+        <h3>Confirm the server ID</h3>
+        <p class="muted">Type the same server ID again to make sure the correct server is selected.</p>
+        <div class="stack compact">
+          <input id="confirmGuildId" inputmode="numeric" autocomplete="off" placeholder="Re-enter Discord Server ID" />
+          <button id="confirmOneBtn" class="primary" type="button">Continue to Final Confirmation</button>
+        </div>
+      </article>
+
+      <article id="confirmTwoCard" class="card panel-card hidden">
+        <span class="eyebrow">CONFIRMATION 2 OF 2</span>
+        <h3>Final confirmation</h3>
+        <p class="muted">This action starts immediately. Type <code>BAN ALL</code> exactly, then press the red button.</p>
         <div class="stack compact">
           <input id="confirmation" autocomplete="off" placeholder="Type BAN ALL" />
-          <button id="executeBtn" class="danger" type="button">Ban Previewed Members</button>
+          <button id="executeBtn" class="danger" type="button">Ban Everyone It Can</button>
         </div>
       </article>
 
@@ -73,7 +83,7 @@
 
   <script type="module">
     const $ = (s) => document.querySelector(s);
-    let previewedGuild = "";
+    let selectedGuild = "";
 
     function message(text = "", type = "") {
       const el = $("#statusMsg");
@@ -105,6 +115,14 @@
       } catch {}
     }
 
+    function resetConfirmations() {
+      selectedGuild = "";
+      $("#confirmGuildId").value = "";
+      $("#confirmation").value = "";
+      $("#confirmOneCard").classList.add("hidden");
+      $("#confirmTwoCard").classList.add("hidden");
+    }
+
     $("#backBtn").onclick = () => { location.href = "/"; };
 
     $("#reconnectBtn").onclick = async () => {
@@ -120,49 +138,63 @@
       }
     };
 
-    $("#previewBtn").onclick = async () => {
+    $("#guildId").addEventListener("input", () => {
+      if (selectedGuild && $("#guildId").value.trim() !== selectedGuild) resetConfirmations();
+    });
+
+    $("#startBtn").onclick = () => {
       const guildId = $("#guildId").value.trim();
       if (!/^\d{5,25}$/.test(guildId)) return message("Enter a valid Discord server ID.", "error");
-      try {
-        message("Loading server members…");
-        const data = await api(`/api/admin/server-cleanup/preview?guild_id=${encodeURIComponent(guildId)}`);
-        previewedGuild = guildId;
-        $("#guildName").textContent = data.guild_name || guildId;
-        $("#targetCount").textContent = data.target_count ?? 0;
-        $("#botId").textContent = data.bot_user_id || "—";
-        $("#serverOwnerId").textContent = data.server_owner_id || "—";
-        $("#confirmCard").classList.remove("hidden");
-        $("#confirmation").value = "";
-        message(`Preview ready: ${data.target_count ?? 0} member(s) can be submitted for cleanup.`, "success");
-      } catch (error) {
-        previewedGuild = "";
-        $("#confirmCard").classList.add("hidden");
-        message(error.message, "error");
-      }
+
+      selectedGuild = guildId;
+      $("#confirmGuildId").value = "";
+      $("#confirmation").value = "";
+      $("#confirmOneCard").classList.remove("hidden");
+      $("#confirmTwoCard").classList.add("hidden");
+      message("First confirmation ready.");
+      $("#confirmGuildId").focus();
+    };
+
+    $("#confirmOneBtn").onclick = () => {
+      if (!selectedGuild) return message("Choose the server first.", "error");
+      const typedGuild = $("#confirmGuildId").value.trim();
+      if (typedGuild !== selectedGuild) return message("The server IDs do not match.", "error");
+
+      $("#confirmTwoCard").classList.remove("hidden");
+      $("#confirmation").value = "";
+      message("Server ID confirmed. Complete the final confirmation.");
+      $("#confirmation").focus();
     };
 
     $("#executeBtn").onclick = async () => {
-      if (!previewedGuild) return message("Preview the server first.", "error");
+      if (!selectedGuild) return message("Choose the server first.", "error");
+      if ($("#confirmGuildId").value.trim() !== selectedGuild) return message("Complete confirmation 1 again.", "error");
+
       const confirmation = $("#confirmation").value.trim();
       if (confirmation.toUpperCase() !== "BAN ALL") return message("Type BAN ALL exactly first.", "error");
-      if (!confirm(`Clean ${$("#guildName").textContent}? This starts immediately.`)) return;
 
       try {
         $("#executeBtn").disabled = true;
-        message("Submitting cleanup to Discord…");
+        $("#startBtn").disabled = true;
+        $("#confirmOneBtn").disabled = true;
+        message("Finding members and submitting cleanup to Discord…");
+
         const data = await api("/api/admin/server-cleanup", {
           method: "POST",
-          body: JSON.stringify({ guild_id: previewedGuild, confirmation }),
+          body: JSON.stringify({ guild_id: selectedGuild, confirmation: "BAN ALL" }),
         });
-        $("#attempted").textContent = data.attempted ?? 0;
+
+        $("#attempted").textContent = data.attempted ?? ((data.banned ?? 0) + (data.failed ?? 0));
         $("#banned").textContent = data.banned ?? 0;
         $("#failed").textContent = data.failed ?? 0;
         $("#confirmation").value = "";
-        message(`Cleanup finished for ${data.guild_name || previewedGuild}. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
+        message(`Cleanup finished for ${data.guild_name || selectedGuild}. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
       } catch (error) {
         message(error.message, "error");
       } finally {
         $("#executeBtn").disabled = false;
+        $("#startBtn").disabled = false;
+        $("#confirmOneBtn").disabled = false;
       }
     };
 

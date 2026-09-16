@@ -1,3 +1,4 @@
+# Eternal Auth production deployment
 name: Deploy Eternal Auth
 
 on:

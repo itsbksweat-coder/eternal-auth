@@ -1,5 +1,5 @@
-# Eternal Auth production deployment
-name: Deploy Eternal Auth
+# Eternal Auth verification
+name: Verify Eternal Auth
 
 on:
   push:
@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: eternal-auth-production
+  group: eternal-auth-verification
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  verify:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,8 +31,5 @@ jobs:
       - name: Check project
         run: npm run check
 
-      - name: Deploy to Cloudflare Workers
-        run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Deployment is handled by Cloudflare Builds, which is connected directly
+      # to this repository's main branch in the Cloudflare dashboard.

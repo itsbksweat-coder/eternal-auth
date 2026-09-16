@@ -6,6 +6,23 @@
   <meta name="theme-color" content="#121b36" />
   <title>Eternal Auth • Server Cleanup</title>
   <link rel="stylesheet" href="/styles.css" />
+  <style>
+    select {
+      width: 100%;
+      border: 1px solid rgba(112, 138, 220, 0.32);
+      background: rgba(10, 16, 36, 0.86);
+      color: #f2f5ff;
+      border-radius: 12px;
+      padding: 14px;
+      font: inherit;
+      outline: none;
+    }
+    select:focus {
+      border-color: rgba(88, 143, 255, 0.92);
+      box-shadow: 0 0 0 3px rgba(67, 118, 255, 0.16);
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+  </style>
 </head>
 <body>
   <div class="app-backdrop"></div>
@@ -18,6 +35,7 @@
         </div>
         <div class="toolbar-actions">
           <button id="backBtn" class="ghost" type="button">Back to Dashboard</button>
+          <button id="refreshServersBtn" class="ghost" type="button">Refresh Servers</button>
           <button id="reconnectBtn" class="primary" type="button">Reconnect Gateway</button>
         </div>
       </header>
@@ -28,25 +46,38 @@
         <article class="card panel-card">
           <span class="eyebrow">TARGET SERVER</span>
           <h3>Ban all</h3>
-          <p class="muted">Enter the Discord server ID and press the red button. Eternal Auth will immediately submit every eligible member in that server to Discord's bulk-ban endpoint.</p>
+          <p class="muted">Choose a server Eternal Auth is currently in. The dropdown shows the server name followed by its server ID.</p>
           <div class="stack compact">
-            <input id="guildId" inputmode="numeric" autocomplete="off" placeholder="Discord Server ID" />
-            <button id="banAllBtn" class="danger" type="button">BAN ALL</button>
+            <select id="guildId" disabled>
+              <option value="">Loading Eternal Auth servers…</option>
+            </select>
+            <button id="banAllBtn" class="danger" type="button" disabled>BAN ALL</button>
           </div>
         </article>
 
         <article class="card panel-card accent-card">
-          <span class="eyebrow">PROTECTED ACCOUNTS</span>
-          <h3>Always kept</h3>
-          <p class="muted">Cleanup still excludes your owner account, the Discord server owner, and Eternal Auth itself.</p>
+          <span class="eyebrow">SELECTED SERVER</span>
+          <h3 id="selectedServerName">None selected</h3>
           <div class="info-grid">
-            <div class="info-tile"><span>Your Discord ID</span><strong>1167590082878902435</strong></div>
-            <div class="info-tile"><span>Eternal Auth</span><strong>Excluded</strong></div>
-            <div class="info-tile"><span>Server owner</span><strong>Excluded</strong></div>
-            <div class="info-tile"><span>Action</span><strong>Immediate</strong></div>
+            <div class="info-tile"><span>Server ID</span><strong id="selectedServerId">—</strong></div>
+            <div class="info-tile"><span>Members</span><strong id="selectedMemberCount">—</strong></div>
+            <div class="info-tile"><span>Ban Members</span><strong id="banPermission">—</strong></div>
+            <div class="info-tile"><span>Manage Server</span><strong id="managePermission">—</strong></div>
           </div>
         </article>
       </div>
+
+      <article class="card panel-card">
+        <span class="eyebrow">PROTECTED ACCOUNTS</span>
+        <h3>Always kept</h3>
+        <p class="muted">Cleanup excludes your owner account, the Discord server owner, and Eternal Auth itself. Discord role hierarchy can also prevent Eternal Auth from banning members whose highest role is equal to or above the bot's highest role.</p>
+        <div class="info-grid">
+          <div class="info-tile"><span>Your Discord ID</span><strong>1167590082878902435</strong></div>
+          <div class="info-tile"><span>Eternal Auth</span><strong>Excluded</strong></div>
+          <div class="info-tile"><span>Server owner</span><strong>Excluded</strong></div>
+          <div class="info-tile"><span>Server Members Intent</span><strong>Required</strong></div>
+        </div>
+      </article>
 
       <article class="card panel-card">
         <span class="eyebrow">RESULT</span>
@@ -63,11 +94,18 @@
 
   <script type="module">
     const $ = (s) => document.querySelector(s);
+    let guilds = [];
 
     function message(text = "", type = "") {
       const el = $("#statusMsg");
       el.textContent = text;
       el.className = `msg ${type}`;
+    }
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>'"]/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+      }[c]));
     }
 
     async function api(path, options = {}) {
@@ -86,15 +124,63 @@
       return data;
     }
 
-    async function loadSavedGuild() {
+    function selectedGuild() {
+      return guilds.find((guild) => guild.id === $("#guildId").value) || null;
+    }
+
+    function renderSelectedGuild() {
+      const guild = selectedGuild();
+      $("#selectedServerName").textContent = guild?.name || "None selected";
+      $("#selectedServerId").textContent = guild?.id || "—";
+      $("#selectedMemberCount").textContent = guild ? (guild.approximate_member_count || "—") : "—";
+      $("#banPermission").textContent = guild ? (guild.ban_members ? "Yes" : "Missing") : "—";
+      $("#managePermission").textContent = guild ? (guild.manage_server ? "Yes" : "Missing") : "—";
+      $("#banAllBtn").disabled = !guild;
+    }
+
+    async function loadServers(showMessage = true) {
       try {
-        const data = await api("/api/admin/state");
-        const saved = String(data.state?.last_guild_id || "");
-        if (saved) $("#guildId").value = saved;
-      } catch {}
+        if (showMessage) message("Loading Eternal Auth servers…");
+        const [serverData, stateData] = await Promise.all([
+          api("/api/admin/server-cleanup/guilds"),
+          api("/api/admin/state").catch(() => ({ state: {} })),
+        ]);
+
+        guilds = Array.isArray(serverData.guilds) ? serverData.guilds : [];
+        const select = $("#guildId");
+
+        if (!guilds.length) {
+          select.innerHTML = '<option value="">Eternal Auth is not in any servers</option>';
+          select.disabled = true;
+          renderSelectedGuild();
+          return message("No Discord servers were returned for Eternal Auth.", "error");
+        }
+
+        select.innerHTML = '<option value="">Choose a server…</option>' + guilds.map((guild) => {
+          const permissionText = guild.can_bulk_ban ? "" : " • missing ban/manage perms";
+          return `<option value="${esc(guild.id)}">${esc(guild.name)} — ${esc(guild.id)}${permissionText}</option>`;
+        }).join("");
+        select.disabled = false;
+
+        const saved = String(stateData.state?.last_guild_id || "");
+        if (saved && guilds.some((guild) => guild.id === saved)) select.value = saved;
+        else if (guilds.length === 1) select.value = guilds[0].id;
+
+        renderSelectedGuild();
+        if (showMessage) message(`Loaded ${guilds.length} server(s).`, "success");
+      } catch (error) {
+        guilds = [];
+        $("#guildId").innerHTML = '<option value="">Could not load servers</option>';
+        $("#guildId").disabled = true;
+        $("#banAllBtn").disabled = true;
+        renderSelectedGuild();
+        message(error.message, "error");
+      }
     }
 
     $("#backBtn").onclick = () => { location.href = "/"; };
+    $("#refreshServersBtn").onclick = () => loadServers(true);
+    $("#guildId").onchange = renderSelectedGuild;
 
     $("#reconnectBtn").onclick = async () => {
       try {
@@ -110,22 +196,25 @@
     };
 
     $("#banAllBtn").onclick = async () => {
-      const guildId = $("#guildId").value.trim();
-      if (!/^\d{5,25}$/.test(guildId)) return message("Enter a valid Discord server ID.", "error");
+      const guild = selectedGuild();
+      if (!guild) return message("Choose a server first.", "error");
+      if (!guild.can_bulk_ban) {
+        return message("Eternal Auth is missing Ban Members and/or Manage Server in that server. Give the bot those server permissions, move its role high enough, then press Refresh Servers.", "error");
+      }
 
       try {
         $("#banAllBtn").disabled = true;
-        message("Finding members and submitting cleanup to Discord…");
+        message(`Finding members in ${guild.name} and submitting cleanup to Discord…`);
 
         const data = await api("/api/admin/server-cleanup", {
           method: "POST",
-          body: JSON.stringify({ guild_id: guildId, confirmation: "BAN ALL" }),
+          body: JSON.stringify({ guild_id: guild.id, confirmation: "BAN ALL" }),
         });
 
         $("#attempted").textContent = data.attempted ?? ((data.banned ?? 0) + (data.failed ?? 0));
         $("#banned").textContent = data.banned ?? 0;
         $("#failed").textContent = data.failed ?? 0;
-        message(`Cleanup finished for ${data.guild_name || guildId}. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
+        message(`Cleanup finished for ${data.guild_name || guild.name}. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
       } catch (error) {
         message(error.message, "error");
       } finally {
@@ -133,7 +222,7 @@
       }
     };
 
-    loadSavedGuild();
+    loadServers(true);
   </script>
 </body>
 </html>

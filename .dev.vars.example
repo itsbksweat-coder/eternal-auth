@@ -1,6 +1,7 @@
 DISCORD_PUBLIC_KEY=your_discord_application_public_key
 DISCORD_BOT_TOKEN=your_discord_bot_token
 DISCORD_APPLICATION_ID=your_discord_application_id
+DISCORD_CLIENT_SECRET=your_discord_oauth_client_secret
 # Bootstrap only. Eternal Auth stores a PBKDF2 hash in D1 after first login.
 ADMIN_PASSWORD=choose_a_long_random_admin_password
 LICENSE_KEY_SECRET=generate_another_long_random_secret

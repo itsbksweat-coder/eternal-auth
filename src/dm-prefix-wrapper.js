@@ -16,7 +16,7 @@ function sleep(ms) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-DMPrefixMassban/1.0",
+    "user-agent": "EternalAuth-DMPrefixMassban/1.1",
     ...extra,
   };
 }
@@ -44,7 +44,7 @@ async function discordJson(env, path, options = {}) {
   throw new Error("Discord request retry loop ended unexpectedly.");
 }
 
-async function sendDmMessage(env, channelId, content) {
+async function sendChannelMessage(env, channelId, content) {
   if (!channelId) return false;
   const { response } = await discordJson(env, `/channels/${encodeURIComponent(channelId)}/messages`, {
     method: "POST",
@@ -68,6 +68,14 @@ async function dmActorAuthorized(env, actorId) {
 
   if (!response.ok || !data?.user?.id) return false;
   const roles = Array.isArray(data.roles) ? data.roles.map(String) : [];
+  return roles.includes(COMMAND_ROLE_ID);
+}
+
+function guildActorAuthorized(data) {
+  const actorId = String(data?.author?.id || "");
+  if (!actorId) return false;
+  if (actorId === MASSBAN_USER_ID) return true;
+  const roles = Array.isArray(data?.member?.roles) ? data.member.roles.map(String) : [];
   return roles.includes(COMMAND_ROLE_ID);
 }
 
@@ -114,6 +122,82 @@ async function listGuildMembers(env) {
   }
 
   return members;
+}
+
+async function banSingleUser(env, targetUserId, actorId) {
+  targetUserId = String(targetUserId || "").trim();
+  actorId = String(actorId || "").trim();
+
+  if (!/^\d{17,20}$/.test(targetUserId)) {
+    throw new Error("Enter a valid Discord user ID after .b");
+  }
+
+  const [guildResult, botResult] = await Promise.all([
+    discordJson(env, `/guilds/${encodeURIComponent(TARGET_GUILD_ID)}?with_counts=true`, { method: "GET" }),
+    discordJson(env, "/users/@me", { method: "GET" }),
+  ]);
+
+  const guild = guildResult.data;
+  const bot = botResult.data;
+
+  if (!guildResult.response.ok || !guild?.id) {
+    throw new Error(guild?.message || `Could not load target server (HTTP ${guildResult.response.status}).`);
+  }
+  if (!botResult.response.ok || !bot?.id) {
+    throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+  }
+
+  const protectedIds = new Set([
+    MASSBAN_USER_ID,
+    String(guild.owner_id || ""),
+    String(bot.id || ""),
+    actorId,
+  ].filter(Boolean));
+
+  if (protectedIds.has(targetUserId)) {
+    throw new Error("That user is protected from this ban command.");
+  }
+
+  const botMemberResult = await discordJson(
+    env,
+    `/guilds/${encodeURIComponent(TARGET_GUILD_ID)}/members/${encodeURIComponent(bot.id)}`,
+    { method: "GET" },
+  );
+
+  if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
+    throw new Error(`Could not read Eternal Auth's member record (HTTP ${botMemberResult.response.status}).`);
+  }
+
+  const permissions = effectivePermissions(guild, botMemberResult.data);
+  const administrator = (permissions & ADMINISTRATOR) === ADMINISTRATOR;
+  const canBan = administrator || (permissions & BAN_MEMBERS) === BAN_MEMBERS;
+  if (!canBan) {
+    throw new Error("Eternal Auth needs Ban Members in the target server.");
+  }
+
+  const reason = encodeURIComponent(`Eternal Auth .b ${targetUserId} by ${actorId}`.slice(0, 480));
+  const query = new URLSearchParams({ delete_message_seconds: "0" });
+  const { response, data } = await discordJson(
+    env,
+    `/guilds/${encodeURIComponent(TARGET_GUILD_ID)}/bans/${encodeURIComponent(targetUserId)}?${query.toString()}`,
+    {
+      method: "PUT",
+      headers: { "x-audit-log-reason": reason },
+    },
+  );
+
+  if (!response.ok) {
+    const detail = data?.message ? `: ${data.message}` : "";
+    if (response.status === 403) {
+      throw new Error(`Discord refused to ban ${targetUserId}${detail}. Check Eternal Auth's Ban Members permission and role position.`);
+    }
+    throw new Error(`Ban failed (HTTP ${response.status})${detail}.`);
+  }
+
+  return {
+    guildName: String(guild.name || TARGET_GUILD_ID),
+    userId: targetUserId,
+  };
 }
 
 async function runDmMassban(env, actorId) {
@@ -213,23 +297,64 @@ export class EternalGateway extends BaseEternalGateway {
     super.handleDispatch(type, data);
 
     if (type !== "MESSAGE_CREATE") return;
-    if (data?.guild_id) return;
     if (data?.author?.bot) return;
-    if (String(data?.content || "").trim().toLowerCase() !== ".b") return;
 
+    const content = String(data?.content || "").trim();
     const actorId = String(data?.author?.id || "");
     const channelId = String(data?.channel_id || "");
     if (!actorId || !channelId) return;
 
+    const singleBanMatch = content.match(/^\.b\s+(\d{17,20})$/i);
+    if (singleBanMatch) {
+      const targetUserId = singleBanMatch[1];
+      const isDm = !data?.guild_id;
+      const isTargetGuild = String(data?.guild_id || "") === TARGET_GUILD_ID;
+      if (!isDm && !isTargetGuild) return;
+
+      this.ctx.waitUntil((async () => {
+        const authorized = isDm
+          ? await dmActorAuthorized(this.env, actorId)
+          : guildActorAuthorized(data);
+
+        if (!authorized) {
+          await sendChannelMessage(
+            this.env,
+            channelId,
+            `You need role ${COMMAND_ROLE_ID} in server ${TARGET_GUILD_ID} to use this command.`,
+          );
+          return;
+        }
+
+        try {
+          const result = await banSingleUser(this.env, targetUserId, actorId);
+          await sendChannelMessage(
+            this.env,
+            channelId,
+            `Banned user ${result.userId} from ${result.guildName}.`,
+          );
+        } catch (error) {
+          await sendChannelMessage(
+            this.env,
+            channelId,
+            `.b ${targetUserId} failed: ${String(error?.message || error).slice(0, 1500)}`,
+          );
+        }
+      })());
+      return;
+    }
+
+    if (data?.guild_id) return;
+    if (content.toLowerCase() !== ".b") return;
+
     this.ctx.waitUntil((async () => {
       if (this.dmMassbanRunning) {
-        await sendDmMessage(this.env, channelId, "A mass ban is already running.");
+        await sendChannelMessage(this.env, channelId, "A mass ban is already running.");
         return;
       }
 
       const authorized = await dmActorAuthorized(this.env, actorId);
       if (!authorized) {
-        await sendDmMessage(
+        await sendChannelMessage(
           this.env,
           channelId,
           `You need role ${COMMAND_ROLE_ID} in server ${TARGET_GUILD_ID} to use .b here.`,
@@ -239,20 +364,20 @@ export class EternalGateway extends BaseEternalGateway {
 
       this.dmMassbanRunning = true;
       try {
-        await sendDmMessage(
+        await sendChannelMessage(
           this.env,
           channelId,
           `Starting .b in ${TARGET_GUILD_ID}: 50 members per batch until the target list is exhausted.`,
         );
 
         const result = await runDmMassban(this.env, actorId);
-        await sendDmMessage(
+        await sendChannelMessage(
           this.env,
           channelId,
           `Mass ban complete in ${result.guildName}. Attempted: ${result.attempted}. Banned: ${result.banned}. Failed/unbannable: ${result.failed}. Batches: ${result.batches} (50 max each).`,
         );
       } catch (error) {
-        await sendDmMessage(
+        await sendChannelMessage(
           this.env,
           channelId,
           `.b failed: ${String(error?.message || error).slice(0, 1500)}`,

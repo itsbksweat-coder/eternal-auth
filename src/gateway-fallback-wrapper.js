@@ -1,5 +1,9 @@
 import prefixWorker, { EternalGateway as PrefixEternalGateway } from "./prefix-massban-wrapper.js";
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class EternalGateway extends PrefixEternalGateway {
   constructor(ctx, env) {
     super(ctx, env);
@@ -11,9 +15,7 @@ export class EternalGateway extends PrefixEternalGateway {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // When the dashboard manually reconnects the bot, try Message Content again.
-    // This lets `.b` start working immediately after the intent is enabled in
-    // Discord's Developer Portal without requiring another code deployment.
+    // A manual reconnect always retries the full privileged-intent set.
     if (url.pathname === "/reconnect" && request.method === "POST") {
       this.messageContentIntentEnabled = true;
       this.messageContentFallback = false;
@@ -30,8 +32,6 @@ export class EternalGateway extends PrefixEternalGateway {
     }
 
     // Safe fallback: GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES.
-    // The bot stays online and slash/dashboard commands keep working, but
-    // Discord will not expose ordinary guild message text, so `.b` is disabled.
     this.sendGateway({
       op: 2,
       d: {
@@ -53,9 +53,6 @@ export class EternalGateway extends PrefixEternalGateway {
   }
 
   handleGatewayClose(code, reason) {
-    // 4014 means Discord rejected one or more privileged intents. The only
-    // privileged Gateway intent added for `.b` is MESSAGE_CONTENT, so fall back
-    // once instead of letting the base Gateway mark itself permanently fatal.
     if (code === 4014 && this.messageContentIntentEnabled) {
       this.messageContentIntentEnabled = false;
       this.messageContentFallback = true;
@@ -92,8 +89,6 @@ export class EternalGateway extends PrefixEternalGateway {
       prefix_b_enabled: !!data.gateway_ready && !this.messageContentFallback,
       prefix_b_fallback: this.messageContentFallback,
       prefix_b_warning: this.messageContentWarning,
-      // Keep the reason visible on the dashboard even after the fallback
-      // connection reaches READY and the base class clears lastError.
       last_error: this.messageContentWarning || data.last_error,
     };
   }
@@ -101,6 +96,34 @@ export class EternalGateway extends PrefixEternalGateway {
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // The Overview button calls /api/admin/gateway/wake. Let the normal
+    // authenticated handler run first, then force the Durable Object to drop
+    // any old fallback session and reconnect with the full privileged intents.
+    if (url.pathname === "/api/admin/gateway/wake" && request.method === "POST") {
+      const wakeResponse = await prefixWorker.fetch(request, env, ctx);
+      if (!wakeResponse.ok) return wakeResponse;
+
+      try {
+        const id = env.GATEWAY.idFromName("eternal-auth-primary-gateway");
+        const gateway = env.GATEWAY.get(id);
+        await gateway.fetch("https://gateway.internal/reconnect", { method: "POST" });
+
+        // Give Discord a moment to deliver HELLO/READY, then return fresh status
+        // in the same shape the Overview page already expects.
+        await sleep(1200);
+        const statusRequest = new Request(new URL("/api/admin/gateway/status", request.url).toString(), {
+          method: "GET",
+          headers: request.headers,
+        });
+        return prefixWorker.fetch(statusRequest, env, ctx);
+      } catch (error) {
+        console.error("Could not force full-intent Gateway reconnect", error);
+        return wakeResponse;
+      }
+    }
+
     return prefixWorker.fetch(request, env, ctx);
   },
 

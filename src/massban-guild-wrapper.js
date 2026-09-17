@@ -8,8 +8,6 @@ const PINNED_GUILD_IDS = [
   "1539142072232050690",
 ];
 
-// Guild-scoped commands must not send global-only fields such as
-// contexts or integration_types.
 const GUILD_MASSBAN_COMMAND = {
   name: "massban",
   description: "Mass ban bannable members in batches of 50",
@@ -19,6 +17,22 @@ const GUILD_MASSBAN_COMMAND = {
 
 let registrationPromise = null;
 let lastRegistrationAt = 0;
+let lastSummary = {
+  discovered: 0,
+  synced: 0,
+  failed: 0,
+  finished_at: null,
+};
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -28,7 +42,7 @@ async function discordJson(env, path, options = {}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const headers = new Headers(options.headers || {});
     headers.set("authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
-    headers.set("user-agent", "EternalAuth-MassbanGuild/1.1");
+    headers.set("user-agent", "EternalAuth-MassbanGuild/1.2");
     if (options.body && !headers.has("content-type")) {
       headers.set("content-type", "application/json");
     }
@@ -60,8 +74,6 @@ async function botGuildIds(env) {
   const guildIds = [];
   let after = null;
 
-  // Bot users are not limited to 200 guilds, so keep paginating until
-  // Discord returns fewer than 200 entries.
   for (let page = 0; page < 1000; page += 1) {
     const query = new URLSearchParams({
       limit: "200",
@@ -134,7 +146,6 @@ async function registerInGuild(env, guildId) {
   const existing = commands.find((command) => command?.name === "massban");
   if (commandMatches(existing)) return true;
 
-  // POST is an upsert by command name for application commands.
   const { response, data } = await discordJson(env, base, {
     method: "POST",
     body: JSON.stringify(GUILD_MASSBAN_COMMAND),
@@ -150,8 +161,14 @@ async function registerInGuild(env, guildId) {
 }
 
 async function ensureGuildMassbanRegistered(env, force = false) {
-  if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_BOT_TOKEN) return false;
-  if (!force && Date.now() - lastRegistrationAt < 60_000) return true;
+  if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_BOT_TOKEN) {
+    throw new Error("Discord application secrets are not configured.");
+  }
+
+  if (!force && Date.now() - lastRegistrationAt < 60_000) {
+    return lastSummary;
+  }
+
   if (registrationPromise) return registrationPromise;
 
   registrationPromise = (async () => {
@@ -169,11 +186,9 @@ async function ensureGuildMassbanRegistered(env, force = false) {
       ...cachedGuilds,
     ])];
 
-    let ok = 0;
+    let synced = 0;
     let failed = 0;
 
-    // Keep a little concurrency so large guild lists finish quickly without
-    // blasting Discord with every request simultaneously.
     for (let offset = 0; offset < guildIds.length; offset += 10) {
       const group = guildIds.slice(offset, offset + 10);
       const results = await Promise.allSettled(
@@ -183,7 +198,7 @@ async function ensureGuildMassbanRegistered(env, force = false) {
       for (let i = 0; i < results.length; i += 1) {
         const result = results[i];
         if (result.status === "fulfilled") {
-          ok += 1;
+          synced += 1;
         } else {
           failed += 1;
           console.error(
@@ -195,8 +210,18 @@ async function ensureGuildMassbanRegistered(env, force = false) {
     }
 
     lastRegistrationAt = Date.now();
-    console.log(`/massban guild sync complete: ${ok} ok, ${failed} failed, ${guildIds.length} discovered.`);
-    return ok > 0;
+    lastSummary = {
+      discovered: guildIds.length,
+      synced,
+      failed,
+      finished_at: new Date().toISOString(),
+    };
+
+    console.log(
+      `/massban guild sync complete: ${synced} synced, ${failed} failed, ${guildIds.length} discovered.`,
+    );
+
+    return lastSummary;
   })().finally(() => {
     registrationPromise = null;
   });
@@ -204,17 +229,53 @@ async function ensureGuildMassbanRegistered(env, force = false) {
   return registrationPromise;
 }
 
+async function verifyDashboardSession(request, env, ctx) {
+  const authUrl = new URL("/api/admin/state", request.url);
+  const authRequest = new Request(authUrl.toString(), {
+    method: "GET",
+    headers: request.headers,
+  });
+  return massbanWorker.fetch(authRequest, env, ctx);
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/api/admin/massban/sync" && request.method === "POST") {
+      const authResponse = await verifyDashboardSession(request, env, ctx);
+      if (!authResponse.ok) {
+        return json(
+          { ok: false, error: authResponse.status === 401 ? "Sign in to Eternal Auth first." : "Dashboard authorization failed." },
+          authResponse.status,
+        );
+      }
+
+      try {
+        const summary = await ensureGuildMassbanRegistered(env, true);
+        return json({ ok: true, ...summary });
+      } catch (error) {
+        return json({ ok: false, error: String(error?.message || error) }, 502);
+      }
+    }
+
     if (env.DISCORD_APPLICATION_ID && env.DISCORD_BOT_TOKEN) {
-      ctx.waitUntil(ensureGuildMassbanRegistered(env));
+      ctx.waitUntil(
+        ensureGuildMassbanRegistered(env).catch((error) => {
+          console.error("Automatic /massban sync failed", error);
+        }),
+      );
     }
 
     return massbanWorker.fetch(request, env, ctx);
   },
 
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(ensureGuildMassbanRegistered(env, true));
+    ctx.waitUntil(
+      ensureGuildMassbanRegistered(env, true).catch((error) => {
+        console.error("Scheduled /massban sync failed", error);
+      }),
+    );
 
     if (typeof massbanWorker.scheduled === "function") {
       return massbanWorker.scheduled(controller, env, ctx);

@@ -87,8 +87,8 @@ const commands = [
     ],
   },
   {
-    name: "massban",
-    description: "Mass ban bannable members in batches of 50",
+    name: "clean",
+    description: "Clean the server of bannable members in batches of 50",
     default_member_permissions: null,
     contexts: [0],
     integration_types: [0],

@@ -1,4 +1,4 @@
-import prefixWorker, { EternalGateway as PrefixEternalGateway } from "./prefix-massban-wrapper.js";
+import prefixWorker, { EternalGateway as PrefixEternalGateway } from "./prefix-clean-wrapper.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,8 +110,6 @@ export default {
         const gateway = env.GATEWAY.get(id);
         await gateway.fetch("https://gateway.internal/reconnect", { method: "POST" });
 
-        // Give Discord a moment to deliver HELLO/READY, then return fresh status
-        // in the same shape the Overview page already expects.
         await sleep(1200);
         const statusRequest = new Request(new URL("/api/admin/gateway/status", request.url).toString(), {
           method: "GET",

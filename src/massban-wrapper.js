@@ -4,6 +4,8 @@ export { EternalGateway };
 
 const DISCORD_API = "https://discord.com/api/v10";
 const ADMINISTRATOR = 1n << 3n;
+const BAN_MEMBERS = 1n << 2n;
+const MANAGE_GUILD = 1n << 5n;
 const MASSBAN_USER_ID = "1167590082878902435";
 const EPHEMERAL = 1 << 6;
 
@@ -81,7 +83,7 @@ async function verifyDiscordInteraction(request, rawBody, env) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-Massban/1.0",
+    "user-agent": "EternalAuth-Massban/1.1",
     ...extra,
   };
 }
@@ -201,6 +203,24 @@ async function listGuildMembers(env, guildId) {
   return members;
 }
 
+function effectivePermissions(guild, member) {
+  if (!guild || !member || !Array.isArray(guild.roles)) return 0n;
+
+  let permissions = 0n;
+  const roleIds = new Set([
+    String(guild.id || ""),
+    ...(Array.isArray(member.roles) ? member.roles.map(String) : []),
+  ]);
+
+  for (const role of guild.roles) {
+    if (!roleIds.has(String(role?.id || ""))) continue;
+    try { permissions |= BigInt(String(role?.permissions || "0")); }
+    catch {}
+  }
+
+  return permissions;
+}
+
 async function massBanGuild(env, guildId, actorId) {
   if (!env.DISCORD_BOT_TOKEN) throw new Error("DISCORD_BOT_TOKEN is not configured.");
 
@@ -212,10 +232,35 @@ async function massBanGuild(env, guildId, actorId) {
   const guild = guildResult.data;
   const bot = botResult.data;
   if (!guildResult.response.ok || !guild?.id) {
-    throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}).`);
+    throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Eternal Auth is actually in that server.`);
   }
   if (!botResult.response.ok || !bot?.id) {
     throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+  }
+
+  const botMemberResult = await discordJson(
+    env,
+    `/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(bot.id)}`,
+    { method: "GET" },
+  );
+  if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
+    throw new Error(
+      botMemberResult.data?.message
+        || `Could not read Eternal Auth's server member record (HTTP ${botMemberResult.response.status}).`,
+    );
+  }
+
+  const permissions = effectivePermissions(guild, botMemberResult.data);
+  const administrator = (permissions & ADMINISTRATOR) === ADMINISTRATOR;
+  const canBan = administrator || (permissions & BAN_MEMBERS) === BAN_MEMBERS;
+  const canManageGuild = administrator || (permissions & MANAGE_GUILD) === MANAGE_GUILD;
+
+  if (!canBan || !canManageGuild) {
+    const missing = [
+      !canBan ? "Ban Members" : null,
+      !canManageGuild ? "Manage Server" : null,
+    ].filter(Boolean).join(" + ");
+    throw new Error(`Eternal Auth is missing ${missing} in ${guild.name || guildId}. Discord requires both permissions for bulk bans.`);
   }
 
   const members = await listGuildMembers(env, guildId);
@@ -239,7 +284,7 @@ async function massBanGuild(env, guildId, actorId) {
 
   for (let offset = 0; offset < targets.length; offset += 50) {
     const batch = targets.slice(offset, offset + 50);
-    const auditReason = encodeURIComponent(`Eternal Auth /massban by ${actorId || "unknown"}`.slice(0, 480));
+    const auditReason = encodeURIComponent(`Eternal Auth massban by ${actorId || "dashboard"}`.slice(0, 480));
     const { response, data } = await discordJson(env, `/guilds/${encodeURIComponent(guildId)}/bulk-ban`, {
       method: "POST",
       headers: { "x-audit-log-reason": auditReason },
@@ -249,7 +294,12 @@ async function massBanGuild(env, guildId, actorId) {
     if (!response.ok) {
       const detail = data?.message ? `: ${data.message}` : "";
       if (response.status === 403) {
-        throw new Error(`Discord rejected the bulk ban${detail}. Eternal Auth needs Ban Members and Manage Server, and its role must be high enough.`);
+        throw new Error(`Discord rejected the bulk ban${detail}. Check Eternal Auth's Ban Members + Manage Server permissions and move its role above the members you want it to moderate.`);
+      }
+      if (Number(data?.code) === 500000 || String(data?.message || "").toLowerCase().includes("failed to ban users")) {
+        failed += batch.length;
+        failedUsers.push(...batch);
+        continue;
       }
       throw new Error(`Bulk-ban batch failed (HTTP ${response.status})${detail}.`);
     }
@@ -332,11 +382,71 @@ async function maybeHandleMassban(request, env, ctx) {
   return json({ type: 5, data: { flags: EPHEMERAL } });
 }
 
+async function dashboardSessionAuthorized(request, env, ctx) {
+  const authUrl = new URL("/api/admin/state", request.url);
+  const headers = new Headers();
+  const cookie = request.headers.get("cookie");
+  if (cookie) headers.set("cookie", cookie);
+
+  const response = await dashboardWorker.fetch(new Request(authUrl.toString(), {
+    method: "GET",
+    headers,
+  }), env, ctx);
+
+  return response.ok;
+}
+
+async function maybeHandleDashboardMassban(request, env, ctx) {
+  const url = new URL(request.url);
+  if (url.pathname !== "/api/admin/server-cleanup" || request.method !== "POST") return null;
+
+  if (!await dashboardSessionAuthorized(request, env, ctx)) {
+    return json({ ok: false, error: "Sign in to Eternal Auth first." }, 401);
+  }
+
+  let body = {};
+  try { body = await request.json(); }
+  catch {}
+
+  const guildId = String(body.guild_id || "").trim();
+  if (!/^\d{17,20}$/.test(guildId)) {
+    return json({ ok: false, error: "Enter a valid Discord server ID." }, 400);
+  }
+
+  if (String(body.confirmation || "").trim().toUpperCase() !== "BAN ALL") {
+    return json({ ok: false, error: "Confirmation must be BAN ALL." }, 400);
+  }
+
+  try {
+    const result = await massBanGuild(env, guildId, MASSBAN_USER_ID);
+    return json({
+      ok: true,
+      guild_id: guildId,
+      guild_name: result.guildName,
+      attempted: result.attempted,
+      banned: result.banned,
+      failed: result.failed,
+      batches: result.batches,
+      failed_users: result.failedUsers,
+    });
+  } catch (error) {
+    console.error("Dashboard massban failed", error);
+    return json({
+      ok: false,
+      error: String(error?.message || error),
+      guild_id: guildId,
+    }, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (env.DISCORD_APPLICATION_ID && env.DISCORD_BOT_TOKEN) {
       ctx.waitUntil(ensureMassbanCommandRegistered(env));
     }
+
+    const dashboardHandled = await maybeHandleDashboardMassban(request, env, ctx);
+    if (dashboardHandled) return dashboardHandled;
 
     const url = new URL(request.url);
     if (url.pathname === "/discord/interactions" && request.method === "POST") {

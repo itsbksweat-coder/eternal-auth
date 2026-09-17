@@ -87,6 +87,13 @@ const commands = [
     ],
   },
   {
+    name: "massban",
+    description: "Mass ban bannable members in batches of 50",
+    default_member_permissions: null,
+    contexts: [0],
+    integration_types: [0],
+  },
+  {
     name: "redeem",
     description: "Redeem an unclaimed Eternal Auth key",
     options: [

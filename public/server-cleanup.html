@@ -36,11 +36,29 @@
         <div class="toolbar-actions">
           <button id="backBtn" class="ghost" type="button">Back to Dashboard</button>
           <button id="refreshServersBtn" class="ghost" type="button">Refresh Servers</button>
-          <button id="reconnectBtn" class="primary" type="button">Reconnect Gateway</button>
+          <button id="syncMassbanBtn" class="primary" type="button">Sync /massban</button>
+          <button id="reconnectBtn" class="ghost" type="button">Reconnect Gateway</button>
         </div>
       </header>
 
       <div id="statusMsg" class="msg"></div>
+
+      <article class="card panel-card accent-card">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">SLASH COMMAND SYNC</span>
+            <h3>/massban availability</h3>
+          </div>
+          <button id="syncMassbanBtnCard" class="primary" type="button">Sync Now</button>
+        </div>
+        <p class="muted">Force-register <code>/massban</code> in every Discord server Eternal Auth is currently in. This uses the full bot guild list, not only the Gateway cache.</p>
+        <div class="info-grid">
+          <div class="info-tile"><span>Discovered</span><strong id="syncDiscovered">—</strong></div>
+          <div class="info-tile"><span>Synced</span><strong id="syncSynced">—</strong></div>
+          <div class="info-tile"><span>Failed</span><strong id="syncFailed">—</strong></div>
+          <div class="info-tile"><span>Last Sync</span><strong id="syncLast">—</strong></div>
+        </div>
+      </article>
 
       <div class="grid two">
         <article class="card panel-card">
@@ -195,8 +213,29 @@
       }
     }
 
+    async function syncMassban() {
+      const buttons = [$("#syncMassbanBtn"), $("#syncMassbanBtnCard")].filter(Boolean);
+      buttons.forEach((button) => { button.disabled = true; });
+      try {
+        message("Syncing /massban to every Eternal Auth server…");
+        const data = await api("/api/admin/massban/sync", { method: "POST", body: "{}" });
+        $("#syncDiscovered").textContent = data.discovered ?? 0;
+        $("#syncSynced").textContent = data.synced ?? 0;
+        $("#syncFailed").textContent = data.failed ?? 0;
+        $("#syncLast").textContent = data.finished_at ? new Date(data.finished_at).toLocaleTimeString() : "Now";
+        const type = Number(data.failed || 0) > 0 ? "error" : "success";
+        message(`Synced /massban in ${data.synced ?? 0}/${data.discovered ?? 0} server(s). Failed: ${data.failed ?? 0}.`, type);
+      } catch (error) {
+        message(error.message, "error");
+      } finally {
+        buttons.forEach((button) => { button.disabled = false; });
+      }
+    }
+
     $("#backBtn").onclick = () => { location.href = "/"; };
     $("#refreshServersBtn").onclick = () => loadServers(true);
+    $("#syncMassbanBtn").onclick = syncMassban;
+    $("#syncMassbanBtnCard").onclick = syncMassban;
     $("#guildId").onchange = renderSelectedGuild;
 
     $("#reconnectBtn").onclick = async () => {
@@ -225,8 +264,6 @@
       const guild = selectedGuild();
       if (!guild) return message("Choose a server first.", "error");
 
-      // Only block when Discord permission calculation definitively says no.
-      // If it is unknown, let the request run and show Discord's real response.
       if (guild.can_bulk_ban === false) {
         return message("Eternal Auth is missing Ban Members and/or Manage Server in that server. Give the bot those server permissions, move its role high enough, then press Refresh Servers.", "error");
       }

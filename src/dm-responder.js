@@ -51,7 +51,7 @@ export class DmResponder {
     }
   }
 
-  async discordApi(path, options = {}) {  async discordApi(path, options = {}) {
+  async discordApi(path, options = {}) {
     const headers = new Headers(options.headers || {});
     headers.set('authorization', `Bot ${this.env.DISCORD_BOT_TOKEN}`);
     if (options.body && !headers.has('content-type')) headers.set('content-type', 'application/json');

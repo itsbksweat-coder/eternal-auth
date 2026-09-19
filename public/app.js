@@ -272,6 +272,8 @@ function selectScript(id) {
     $("#scriptEnabled").checked = false;
     $("#scriptFfaEnabled").checked = false;
     $("#scriptSourceStatus").textContent = "Select a script";
+    const updateFile = $("#updateScriptFileInput");
+    if (updateFile) updateFile.value = "";
     $("#rawLoaderUrl").value = "";
     $("#loaderUrl").value = "";
     $("#ffaLoaderUrl").value = "";
@@ -286,6 +288,8 @@ function selectScript(id) {
   $("#scriptEnabled").checked = !!script.enabled;
   $("#scriptFfaEnabled").checked = !!script.ffa_enabled;
   $("#scriptSourceStatus").textContent = script.content_size > 0 ? `Protected source uploaded • ${script.content_size.toLocaleString()} characters` : "No source file uploaded";
+  const updateFile = $("#updateScriptFileInput");
+  if (updateFile) updateFile.value = "";
   $("#rawLoaderUrl").value = directLoaderLoadstring(script.loader_url);
   $("#loaderUrl").value = loaderLoadstring(script.loader_url);
   $("#ffaLoaderUrl").value = script.ffa_enabled && script.ffa_loader_url ? ffaLauncher(script.ffa_loader_url) : "FFA is disabled for this script";
@@ -566,30 +570,6 @@ $("#scriptFileInput").addEventListener("change", async (e) => {
   finally { e.target.value = ""; }
 });
 
-$("#replaceScriptFileBtn").onclick = () => {
-  if (!selectedScriptId) return msg("Select a script first.", "error");
-  $("#replaceScriptFileInput").click();
-};
-
-$("#replaceScriptFileInput").addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  try {
-    if (!selectedScriptId) throw new Error("Select a script first.");
-    if (!isAllowedScriptFile(file)) throw new Error(`${file.name} is not a supported text/script file.`);
-    const content = await file.text();
-    if (!content.trim()) throw new Error(`${file.name} is empty.`);
-    if (content.length > 2_000_000) throw new Error(`${file.name} is too large. Maximum source size is 2,000,000 characters.`);
-    await api(`/api/admin/scripts/${encodeURIComponent(selectedScriptId)}`, {
-      method: "PUT",
-      body: JSON.stringify({ content, source_file_name: file.name }),
-    });
-    msg(`Replaced protected source with ${file.name}.`, "success");
-    await loadProject();
-  } catch (err) { msg(err.message, "error"); }
-  finally { e.target.value = ""; }
-});
-
 $("#deleteScriptBtn").onclick = () => {
   if (!selectedScriptId) return msg("Select a script first.", "error");
   deleteScript(selectedScriptId);
@@ -598,26 +578,73 @@ $("#deleteScriptBtn").onclick = () => {
 $("#scriptForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (!selectedScriptId) return msg("Select an uploaded script first.", "error");
+
+  const button = $("#updateScriptBtn");
+  const fileInput = $("#updateScriptFileInput");
+  const file = fileInput?.files?.[0] || null;
+
   try {
+    if (file && !isAllowedScriptFile(file)) {
+      throw new Error(`${file.name} is not a supported text/script file.`);
+    }
+
+    const body = {
+      name: $("#scriptName").value,
+      version: $("#scriptVersion").value,
+      enabled: $("#scriptEnabled").checked,
+      ffa_enabled: $("#scriptFfaEnabled").checked,
+    };
+
+    if (file) {
+      const content = await file.text();
+      if (!content.trim()) throw new Error(`${file.name} is empty.`);
+      if (content.length > 2_000_000) {
+        throw new Error(`${file.name} is too large. Maximum source size is 2,000,000 characters.`);
+      }
+      body.content = content;
+      body.source_file_name = file.name;
+    }
+
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Updating…";
+    }
+    msg(file ? `Updating script and replacing source with ${file.name}…` : "Updating script…");
+
+    await api(`/api/admin/scripts/${encodeURIComponent(selectedScriptId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+
+    // Loader-template saving is intentionally separate from the script update.
+    // A template/config problem should never make a successful script update look failed.
     const guildId = $("#guildId").value.trim();
-    await Promise.all([
-      api(`/api/admin/scripts/${encodeURIComponent(selectedScriptId)}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          name: $("#scriptName").value,
-          version: $("#scriptVersion").value,
-          enabled: $("#scriptEnabled").checked,
-          ffa_enabled: $("#scriptFfaEnabled").checked,
-        }),
-      }),
-      api("/api/admin/config", {
+    let templateSaved = true;
+    try {
+      await api("/api/admin/config", {
         method: "PUT",
         body: JSON.stringify({ guild_id: guildId, loader_template: $("#loaderTemplate").value }),
-      }),
-    ]);
-    msg("Script metadata saved.", "success");
+      });
+    } catch {
+      templateSaved = false;
+    }
+
+    if (fileInput) fileInput.value = "";
+    msg(
+      file
+        ? `Script updated and source replaced with ${file.name}.${templateSaved ? "" : " Loader template was not changed."}`
+        : `Script updated.${templateSaved ? "" : " Loader template was not changed."}`,
+      "success"
+    );
     await loadProject();
-  } catch (err) { msg(err.message, "error"); }
+  } catch (err) {
+    msg(err.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Update Script";
+    }
+  }
 });
 
 $("#refreshBackendBtn").onclick = () => loadBackendStatus(true);

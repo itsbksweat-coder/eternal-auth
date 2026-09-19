@@ -1537,44 +1537,36 @@ for _,n in ipairs({"rconsoleprint","rconsolewarn","rconsoleerr","rconsoleinfo","
     __ea_wrap_global(n,"filter")
 end
 
--- Layer 3: replace clipboard writes before reporting or kicking.
-local __ea_clipboard_busy=false
+-- Layer 3: disable clipboard reads and writes for the lifetime of the loader.
+-- This covers the common executor globals plus clipboard/syn table aliases.
 local __ea_clipboard_wrappers={}
 local function __ea_install_clipboard(env,name)
-    -- Some executors expose clipboard functions through the environment's
-    -- __index metamethod. A rawget-only lookup misses those functions.
     local okRead,old=pcall(function() return env[name] end)
-    if not okRead then return end
-    if type(old)~="function" then return end
-    local existing=__ea_clipboard_wrappers[old]
-    if existing then env[name]=existing __ea_track(env,name,existing) return end
-    local original=old
-    local wrapper
-    wrapper=function(...)
-        if __ea_clipboard_busy then return "Blacklisted" end
-        __ea_clipboard_busy=true
-        -- Never forward the requested text, even when the report fails.
-        pcall(original,"Blacklisted")
-        __ea_clipboard_busy=false
-        __ea_block("clipboard")
-        return "Blacklisted"
+    if not okRead or type(old)~="function" then return end
+    local wrapper=__ea_clipboard_wrappers[old]
+    if not wrapper then
+        wrapper=function(...) return nil end
+        __ea_clipboard_wrappers[old]=wrapper
+        __ea_clipboard_wrappers[wrapper]=wrapper
+        if type(hookfunction)=="function" then pcall(hookfunction,old,wrapper) end
     end
-    if type(hookfunction)=="function" then
-        local ok,unhooked=pcall(hookfunction,old,wrapper)
-        if ok and type(unhooked)=="function" then original=unhooked end
-    end
-    __ea_clipboard_wrappers[old]=wrapper
-    __ea_clipboard_wrappers[wrapper]=wrapper
     env[name]=wrapper
     __ea_track(env,name,wrapper)
 end
 for _,env in ipairs(__ea_envs()) do
-    for _,name in ipairs({"setclipboard","toclipboard","writeclipboard","set_clipboard","setrbxclipboard","copyclipboard","clipboardset","setclip"}) do
+    for _,name in ipairs({
+        "setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
+        "setrbxclipboard","copyclipboard","clipboardset","setclip",
+        "getclipboard","readclipboard","get_clipboard","read_clipboard","clipboardget","getclip"
+    }) do
         pcall(__ea_install_clipboard,env,name)
     end
     for _,tableName in ipairs({"clipboard","Clipboard","syn"}) do
         if type(env[tableName])=="table" then
-            for _,name in ipairs({"set","write","copy","setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard","copyclipboard","setclip"}) do
+            for _,name in ipairs({
+                "set","write","copy","setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
+                "get","read","getclipboard","readclipboard","get_clipboard","read_clipboard","copyclipboard","setclip"
+            }) do
                 pcall(__ea_install_clipboard,env[tableName],name)
             end
         end
@@ -1788,6 +1780,21 @@ task.spawn(function()
         end
     end
 end)
+
+-- Reject the simple logger pattern where native request/loadstring/require
+-- functions were replaced with ordinary Lua closures before Eternal Auth ran.
+local function __ea_obviously_hooked(fn)
+    if type(fn)~="function" then return false end
+    local ok,result=pcall(function()
+        if type(islclosure)=="function" and islclosure(fn) then return true end
+        if type(iscclosure)=="function" then return not iscclosure(fn) end
+        return false
+    end)
+    return ok and result==true
+end
+if __ea_obviously_hooked(loadstring) then __ea_block("integrity") return end
+if __ea_obviously_hooked(__ea_request) then __ea_block("http_spy") return end
+if type(require)=="function" and __ea_obviously_hooked(require) then __ea_block("environment") return end
 
 ${protectedUrl}
 if not __ea_request then K("Eternal Auth requires an HTTP request function.") return end

@@ -130,24 +130,31 @@
             </article>
           </div>
 
-          <article class="card panel-card" id="overviewCleanupCard">
+          <article class="card panel-card" id="overviewModerationCard">
             <div class="section-head">
               <div>
-                <span class="eyebrow">SERVER CLEANUP</span>
-                <h3>Ban all by server ID</h3>
+                <span class="eyebrow">SERVER MODERATION</span>
+                <h3>Ban or unban a user</h3>
               </div>
             </div>
-            <p class="muted">Paste the Discord server ID. Eternal Auth sends that exact server ID to the Discord bot and bans the members Discord allows the bot to ban.</p>
+            <p class="muted">Choose WakeHub or CleanHub, enter a Discord user ID, then ban or unban that account.</p>
             <div class="stack compact">
-              <input id="overviewCleanupGuildId" type="text" inputmode="numeric" autocomplete="off" placeholder="Discord server ID" maxlength="20" />
-              <button id="overviewBanAllBtn" class="danger" type="button">BAN ALL</button>
+              <select id="overviewModerationGuild" style="width:100%">
+                <option value="1249019782632570971">WakeHub — 1249019782632570971</option>
+                <option value="1539142072232050690">CleanHub — 1539142072232050690</option>
+              </select>
+              <input id="overviewModerationUserId" type="text" inputmode="numeric" autocomplete="off" placeholder="Discord user ID" maxlength="25" />
+              <div class="grid two">
+                <button id="overviewBanBtn" class="danger" type="button">BAN</button>
+                <button id="overviewUnbanBtn" class="primary" type="button">UNBAN</button>
+              </div>
             </div>
-            <div id="overviewCleanupMsg" class="msg"></div>
+            <div id="overviewModerationMsg" class="msg"></div>
             <div class="info-grid">
-              <div class="info-tile"><span>Server</span><strong id="overviewCleanupServer">—</strong></div>
-              <div class="info-tile"><span>Attempted</span><strong id="overviewCleanupAttempted">—</strong></div>
-              <div class="info-tile"><span>Banned</span><strong id="overviewCleanupBanned">—</strong></div>
-              <div class="info-tile"><span>Failed / unbannable</span><strong id="overviewCleanupFailed">—</strong></div>
+              <div class="info-tile"><span>Server</span><strong id="overviewModerationServer">—</strong></div>
+              <div class="info-tile"><span>User ID</span><strong id="overviewModerationUser">—</strong></div>
+              <div class="info-tile"><span>Action</span><strong id="overviewModerationAction">—</strong></div>
+              <div class="info-tile"><span>Result</span><strong id="overviewModerationResult">—</strong></div>
             </div>
           </article>
         </section>
@@ -229,47 +236,41 @@
   </main>
 
   <script type="module">
-    const cleanupInput = document.querySelector("#overviewCleanupGuildId");
-    const cleanupButton = document.querySelector("#overviewBanAllBtn");
-    const cleanupMessage = document.querySelector("#overviewCleanupMsg");
-    const workspaceGuild = document.querySelector("#guildId");
+    const moderationGuild = document.querySelector("#overviewModerationGuild");
+    const moderationUser = document.querySelector("#overviewModerationUserId");
+    const moderationBan = document.querySelector("#overviewBanBtn");
+    const moderationUnban = document.querySelector("#overviewUnbanBtn");
+    const moderationMessage = document.querySelector("#overviewModerationMsg");
 
-    function cleanupMsg(text = "", type = "") {
-      cleanupMessage.textContent = text;
-      cleanupMessage.className = `msg ${type}`;
+    function moderationMsg(text = "", type = "") {
+      moderationMessage.textContent = text;
+      moderationMessage.className = `msg ${type}`;
     }
 
-    cleanupInput.addEventListener("input", () => {
-      cleanupInput.value = cleanupInput.value.replace(/\D/g, "").slice(0, 20);
-    });
+    function moderationUserId() {
+      moderationUser.value = moderationUser.value.replace(/\D/g, "").slice(0, 25);
+      return /^\d{5,25}$/.test(moderationUser.value) ? moderationUser.value : "";
+    }
 
-    cleanupInput.addEventListener("focus", () => {
-      if (!cleanupInput.value && /^\d{17,20}$/.test(workspaceGuild?.value?.trim() || "")) {
-        cleanupInput.value = workspaceGuild.value.trim();
-      }
-    });
+    moderationUser.addEventListener("input", moderationUserId);
 
-    cleanupButton.addEventListener("click", async () => {
-      const guildId = cleanupInput.value.trim();
-      if (!/^\d{17,20}$/.test(guildId)) {
-        cleanupMsg("Enter a valid Discord server ID first.", "error");
+    async function runModeration(action) {
+      const guildId = moderationGuild.value;
+      const userId = moderationUserId();
+      if (!userId) {
+        moderationMsg("Enter a valid Discord user ID first.", "error");
         return;
       }
 
-      if (!confirm(`Ban every member Eternal Auth can ban in server ${guildId}?`)) return;
-
-      cleanupButton.disabled = true;
-      cleanupMsg(`Sending server ${guildId} to Eternal Auth…`);
-      document.querySelector("#overviewCleanupServer").textContent = guildId;
-      document.querySelector("#overviewCleanupAttempted").textContent = "…";
-      document.querySelector("#overviewCleanupBanned").textContent = "…";
-      document.querySelector("#overviewCleanupFailed").textContent = "…";
+      moderationBan.disabled = true;
+      moderationUnban.disabled = true;
+      moderationMsg(`${action === "ban" ? "Banning" : "Unbanning"} ${userId}…`);
 
       try {
-        const response = await fetch("/api/admin/server-cleanup", {
+        const response = await fetch(`/api/admin/moderation/${action}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ guild_id: guildId, confirmation: "BAN ALL" }),
+          body: JSON.stringify({ guild_id: guildId, user_id: userId }),
         });
 
         let data;
@@ -284,20 +285,25 @@
           throw new Error(data.error || `HTTP ${response.status}`);
         }
 
-        document.querySelector("#overviewCleanupServer").textContent = data.guild_name || guildId;
-        document.querySelector("#overviewCleanupAttempted").textContent = data.attempted ?? ((data.banned ?? 0) + (data.failed ?? 0));
-        document.querySelector("#overviewCleanupBanned").textContent = data.banned ?? 0;
-        document.querySelector("#overviewCleanupFailed").textContent = data.failed ?? 0;
-        cleanupMsg(`Finished. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
+        document.querySelector("#overviewModerationServer").textContent = `${data.guild_name} — ${data.guild_id}`;
+        document.querySelector("#overviewModerationUser").textContent = data.user_id;
+        document.querySelector("#overviewModerationAction").textContent = action === "ban" ? "Ban" : "Unban";
+        document.querySelector("#overviewModerationResult").textContent = "Success";
+        moderationMsg(`${action === "ban" ? "Banned" : "Unbanned"} ${data.user_id} in ${data.guild_name}.`, "success");
       } catch (error) {
-        document.querySelector("#overviewCleanupAttempted").textContent = "—";
-        document.querySelector("#overviewCleanupBanned").textContent = "—";
-        document.querySelector("#overviewCleanupFailed").textContent = "—";
-        cleanupMsg(error.message || String(error), "error");
+        document.querySelector("#overviewModerationServer").textContent = moderationGuild.selectedOptions[0]?.textContent || guildId;
+        document.querySelector("#overviewModerationUser").textContent = userId;
+        document.querySelector("#overviewModerationAction").textContent = action === "ban" ? "Ban" : "Unban";
+        document.querySelector("#overviewModerationResult").textContent = "Failed";
+        moderationMsg(error.message || String(error), "error");
       } finally {
-        cleanupButton.disabled = false;
+        moderationBan.disabled = false;
+        moderationUnban.disabled = false;
       }
-    });
+    }
+
+    moderationBan.addEventListener("click", () => runModeration("ban"));
+    moderationUnban.addEventListener("click", () => runModeration("unban"));
   </script>
   <script type="module" src="/app.js"></script>
 </body>

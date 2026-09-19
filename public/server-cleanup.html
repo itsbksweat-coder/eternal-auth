@@ -4,11 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="theme-color" content="#121b36" />
-  <title>Eternal Auth • Server Cleanup</title>
+  <title>Eternal Auth • Moderation</title>
   <link rel="stylesheet" href="/styles.css" />
   <style>
-    #guildId { width: 100%; }
-    button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+    select { width: 100%; }
+    .moderation-actions { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    button:disabled { opacity:.5; cursor:not-allowed; filter:none; }
   </style>
 </head>
 <body>
@@ -17,78 +18,48 @@
     <section class="content-area">
       <header class="content-topbar card">
         <div>
-          <p class="crumb">Eternal Auth / Server Cleanup</p>
-          <h1>Server Cleanup</h1>
+          <p class="crumb">Eternal Auth / Moderation</p>
+          <h1>Ban & Unban</h1>
         </div>
         <div class="toolbar-actions">
           <button id="backBtn" class="ghost" type="button">Back to Dashboard</button>
-          <button id="syncMassbanBtn" class="primary" type="button">Sync /massban</button>
-          <button id="reconnectBtn" class="ghost" type="button">Reconnect Gateway</button>
         </div>
       </header>
 
       <div id="statusMsg" class="msg"></div>
 
-      <article class="card panel-card accent-card">
-        <div class="section-head">
-          <div>
-            <span class="eyebrow">SLASH COMMAND SYNC</span>
-            <h3>/massban availability</h3>
-          </div>
-          <button id="syncMassbanBtnCard" class="primary" type="button">Sync Now</button>
-        </div>
-        <p class="muted">Force-register <code>/massban</code> in every Discord server Eternal Auth is currently in.</p>
-        <div class="info-grid">
-          <div class="info-tile"><span>Discovered</span><strong id="syncDiscovered">—</strong></div>
-          <div class="info-tile"><span>Synced</span><strong id="syncSynced">—</strong></div>
-          <div class="info-tile"><span>Failed</span><strong id="syncFailed">—</strong></div>
-          <div class="info-tile"><span>Last Sync</span><strong id="syncLast">—</strong></div>
-        </div>
-      </article>
-
       <div class="grid two">
         <article class="card panel-card">
           <span class="eyebrow">TARGET SERVER</span>
-          <h3>Ban all by server ID</h3>
-          <p class="muted">Paste the Discord server ID below. Eternal Auth sends that exact ID to the Discord bot instead of loading a server list.</p>
+          <h3>Choose server</h3>
           <div class="stack compact">
-            <input id="guildId" type="text" inputmode="numeric" autocomplete="off" placeholder="Discord server ID" maxlength="20" />
-            <button id="banAllBtn" class="danger" type="button" disabled>BAN ALL</button>
+            <select id="guildId">
+              <option value="1249019782632570971">WakeHub — 1249019782632570971</option>
+              <option value="1539142072232050690">CleanHub — 1539142072232050690</option>
+            </select>
           </div>
         </article>
 
-        <article class="card panel-card accent-card">
-          <span class="eyebrow">TARGET SERVER</span>
-          <h3 id="selectedServerName">Enter a server ID</h3>
-          <div class="info-grid">
-            <div class="info-tile"><span>Server ID</span><strong id="selectedServerId">—</strong></div>
-            <div class="info-tile"><span>Members</span><strong id="selectedMemberCount">Checked when run</strong></div>
-            <div class="info-tile"><span>Ban Members</span><strong id="banPermission">Checked by Discord</strong></div>
-            <div class="info-tile"><span>Manage Server</span><strong id="managePermission">Checked by Discord</strong></div>
+        <article class="card panel-card">
+          <span class="eyebrow">TARGET USER</span>
+          <h3>Discord user ID</h3>
+          <div class="stack compact">
+            <input id="userId" type="text" inputmode="numeric" autocomplete="off" placeholder="Discord user ID" maxlength="25" />
+            <div class="moderation-actions">
+              <button id="banBtn" class="danger" type="button" disabled>BAN</button>
+              <button id="unbanBtn" class="primary" type="button" disabled>UNBAN</button>
+            </div>
           </div>
         </article>
       </div>
 
-      <article class="card panel-card">
-        <span class="eyebrow">PROTECTED ACCOUNTS</span>
-        <h3>Always kept</h3>
-        <p class="muted">Cleanup excludes your owner account, the Discord server owner, and Eternal Auth itself. Discord role hierarchy can also prevent Eternal Auth from banning members whose highest role is equal to or above the bot's highest role.</p>
+      <article class="card panel-card accent-card">
+        <span class="eyebrow">LAST ACTION</span>
         <div class="info-grid">
-          <div class="info-tile"><span>Your Discord ID</span><strong>1167590082878902435</strong></div>
-          <div class="info-tile"><span>Eternal Auth</span><strong>Excluded</strong></div>
-          <div class="info-tile"><span>Server owner</span><strong>Excluded</strong></div>
-          <div class="info-tile"><span>Server Members Intent</span><strong>Required for cleanup</strong></div>
-        </div>
-      </article>
-
-      <article class="card panel-card">
-        <span class="eyebrow">RESULT</span>
-        <h3>Last cleanup result</h3>
-        <div class="info-grid">
-          <div class="info-tile"><span>Attempted</span><strong id="attempted">—</strong></div>
-          <div class="info-tile"><span>Banned</span><strong id="banned">—</strong></div>
-          <div class="info-tile"><span>Failed / unbannable</span><strong id="failed">—</strong></div>
-          <div class="info-tile"><span>Gateway</span><strong id="gatewayStatus">—</strong></div>
+          <div class="info-tile"><span>Server</span><strong id="resultServer">—</strong></div>
+          <div class="info-tile"><span>User ID</span><strong id="resultUser">—</strong></div>
+          <div class="info-tile"><span>Action</span><strong id="resultAction">—</strong></div>
+          <div class="info-tile"><span>Result</span><strong id="resultStatus">—</strong></div>
         </div>
       </article>
     </section>
@@ -119,98 +90,54 @@
       return data;
     }
 
-    function targetGuildId() {
-      const id = $("#guildId").value.trim();
-      return /^\d{17,20}$/.test(id) ? id : "";
+    function validUserId() {
+      const value = $("#userId").value.replace(/\D/g, "").slice(0, 25);
+      $("#userId").value = value;
+      return /^\d{5,25}$/.test(value);
     }
 
-    function renderTarget() {
-      const raw = $("#guildId").value.trim();
-      const valid = targetGuildId();
-      $("#selectedServerId").textContent = raw || "—";
-      $("#selectedServerName").textContent = valid ? "Ready to send to Eternal Auth" : (raw ? "Invalid server ID" : "Enter a server ID");
-      $("#banAllBtn").disabled = !valid;
+    function updateButtons() {
+      const valid = validUserId();
+      $("#banBtn").disabled = !valid;
+      $("#unbanBtn").disabled = !valid;
     }
 
-    async function syncMassban() {
-      const buttons = [$("#syncMassbanBtn"), $("#syncMassbanBtnCard")].filter(Boolean);
-      buttons.forEach((button) => { button.disabled = true; });
+    async function run(action) {
+      const guildId = $("#guildId").value;
+      const userId = $("#userId").value.trim();
+      if (!validUserId()) return message("Enter a valid Discord user ID.", "error");
+
+      $("#banBtn").disabled = true;
+      $("#unbanBtn").disabled = true;
+      message(`${action === "ban" ? "Banning" : "Unbanning"} ${userId}…`);
+
       try {
-        message("Syncing /massban to every Eternal Auth server…");
-        const data = await api("/api/admin/massban/sync", { method: "POST", body: "{}" });
-        $("#syncDiscovered").textContent = data.discovered ?? 0;
-        $("#syncSynced").textContent = data.synced ?? 0;
-        $("#syncFailed").textContent = data.failed ?? 0;
-        $("#syncLast").textContent = data.finished_at ? new Date(data.finished_at).toLocaleTimeString() : "Now";
-        const type = Number(data.failed || 0) > 0 ? "error" : "success";
-        message(`Synced /massban in ${data.synced ?? 0}/${data.discovered ?? 0} server(s). Failed: ${data.failed ?? 0}.`, type);
+        const data = await api(`/api/admin/moderation/${action}`, {
+          method: "POST",
+          body: JSON.stringify({ guild_id: guildId, user_id: userId }),
+        });
+
+        $("#resultServer").textContent = `${data.guild_name} — ${data.guild_id}`;
+        $("#resultUser").textContent = data.user_id;
+        $("#resultAction").textContent = action === "ban" ? "Ban" : "Unban";
+        $("#resultStatus").textContent = "Success";
+        message(`${action === "ban" ? "Banned" : "Unbanned"} ${data.user_id} in ${data.guild_name}.`, "success");
       } catch (error) {
-        message(error.message, "error");
+        $("#resultServer").textContent = $("#guildId").selectedOptions[0]?.textContent || guildId;
+        $("#resultUser").textContent = userId;
+        $("#resultAction").textContent = action === "ban" ? "Ban" : "Unban";
+        $("#resultStatus").textContent = "Failed";
+        message(error.message || String(error), "error");
       } finally {
-        buttons.forEach((button) => { button.disabled = false; });
+        updateButtons();
       }
-    }
-
-    async function loadSavedTarget() {
-      try {
-        const data = await api("/api/admin/state");
-        const saved = String(data.state?.last_guild_id || "");
-        if (/^\d{17,20}$/.test(saved)) $("#guildId").value = saved;
-      } catch {}
-      renderTarget();
     }
 
     $("#backBtn").onclick = () => { location.href = "/"; };
-    $("#syncMassbanBtn").onclick = syncMassban;
-    $("#syncMassbanBtnCard").onclick = syncMassban;
-    $("#guildId").oninput = renderTarget;
-
-    $("#reconnectBtn").onclick = async () => {
-      try {
-        $("#reconnectBtn").disabled = true;
-        message("Reconnecting Eternal Auth Gateway…");
-        const data = await api("/api/admin/gateway/reconnect-now", { method: "POST", body: "{}" });
-        const ready = !!data.gateway?.gateway_ready;
-        $("#gatewayStatus").textContent = ready ? "Online" : "Connecting";
-        message(ready ? "Eternal Auth Gateway is online." : "Gateway reconnect started.", ready ? "success" : "");
-      } catch (error) {
-        $("#gatewayStatus").textContent = "Error";
-        message(error.message, "error");
-      } finally {
-        $("#reconnectBtn").disabled = false;
-      }
-    };
-
-    $("#banAllBtn").onclick = async () => {
-      const guildId = targetGuildId();
-      if (!guildId) return message("Enter a valid Discord server ID first.", "error");
-
-      try {
-        $("#banAllBtn").disabled = true;
-        message(`Sending server ${guildId} to Eternal Auth for cleanup…`);
-
-        const data = await api("/api/admin/server-cleanup", {
-          method: "POST",
-          body: JSON.stringify({ guild_id: guildId, confirmation: "BAN ALL" }),
-        });
-
-        $("#selectedServerName").textContent = data.guild_name || "Discord server";
-        $("#selectedServerId").textContent = guildId;
-        $("#selectedMemberCount").textContent = data.attempted ?? "—";
-        $("#banPermission").textContent = "Accepted";
-        $("#managePermission").textContent = "Accepted";
-        $("#attempted").textContent = data.attempted ?? ((data.banned ?? 0) + (data.failed ?? 0));
-        $("#banned").textContent = data.banned ?? 0;
-        $("#failed").textContent = data.failed ?? 0;
-        message(`Cleanup finished for ${data.guild_name || guildId}. Banned: ${data.banned ?? 0}. Failed: ${data.failed ?? 0}.`, "success");
-      } catch (error) {
-        message(error.message, "error");
-      } finally {
-        renderTarget();
-      }
-    };
-
-    loadSavedTarget();
+    $("#userId").addEventListener("input", updateButtons);
+    $("#banBtn").onclick = () => run("ban");
+    $("#unbanBtn").onclick = () => run("unban");
+    updateButtons();
   </script>
 </body>
 </html>

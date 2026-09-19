@@ -42,6 +42,7 @@
         <nav class="sidebar-nav card">
           <span class="nav-label">WORKSPACE</span>
           <button class="tab active" data-tab="gateway">Overview</button>
+          <button class="tab" type="button" onclick="location.href='/server-cleanup.html'">Moderation</button>
           <button class="tab" data-tab="serverkeys">Server Keys</button>
           <button class="tab" data-tab="licenses">Users</button>
           <button class="tab" data-tab="stock">Stock Keys</button>
@@ -130,33 +131,6 @@
             </article>
           </div>
 
-          <article class="card panel-card" id="overviewModerationCard">
-            <div class="section-head">
-              <div>
-                <span class="eyebrow">SERVER MODERATION</span>
-                <h3>Ban or unban a user</h3>
-              </div>
-            </div>
-            <p class="muted">Choose WakeHub or CleanHub, enter a Discord user ID, then ban or unban that account.</p>
-            <div class="stack compact">
-              <select id="overviewModerationGuild" style="width:100%">
-                <option value="1249019782632570971">WakeHub — 1249019782632570971</option>
-                <option value="1539142072232050690">CleanHub — 1539142072232050690</option>
-              </select>
-              <input id="overviewModerationUserId" type="text" inputmode="numeric" autocomplete="off" placeholder="Discord user ID" maxlength="25" />
-              <div class="grid two">
-                <button id="overviewBanBtn" class="danger" type="button">BAN</button>
-                <button id="overviewUnbanBtn" class="primary" type="button">UNBAN</button>
-              </div>
-            </div>
-            <div id="overviewModerationMsg" class="msg"></div>
-            <div class="info-grid">
-              <div class="info-tile"><span>Server</span><strong id="overviewModerationServer">—</strong></div>
-              <div class="info-tile"><span>User ID</span><strong id="overviewModerationUser">—</strong></div>
-              <div class="info-tile"><span>Action</span><strong id="overviewModerationAction">—</strong></div>
-              <div class="info-tile"><span>Result</span><strong id="overviewModerationResult">—</strong></div>
-            </div>
-          </article>
         </section>
 
         <section class="tabpane hidden" data-pane="serverkeys">
@@ -235,76 +209,6 @@
     </section>
   </main>
 
-  <script type="module">
-    const moderationGuild = document.querySelector("#overviewModerationGuild");
-    const moderationUser = document.querySelector("#overviewModerationUserId");
-    const moderationBan = document.querySelector("#overviewBanBtn");
-    const moderationUnban = document.querySelector("#overviewUnbanBtn");
-    const moderationMessage = document.querySelector("#overviewModerationMsg");
-
-    function moderationMsg(text = "", type = "") {
-      moderationMessage.textContent = text;
-      moderationMessage.className = `msg ${type}`;
-    }
-
-    function moderationUserId() {
-      moderationUser.value = moderationUser.value.replace(/\D/g, "").slice(0, 25);
-      return /^\d{5,25}$/.test(moderationUser.value) ? moderationUser.value : "";
-    }
-
-    moderationUser.addEventListener("input", moderationUserId);
-
-    async function runModeration(action) {
-      const guildId = moderationGuild.value;
-      const userId = moderationUserId();
-      if (!userId) {
-        moderationMsg("Enter a valid Discord user ID first.", "error");
-        return;
-      }
-
-      moderationBan.disabled = true;
-      moderationUnban.disabled = true;
-      moderationMsg(`${action === "ban" ? "Banning" : "Unbanning"} ${userId}…`);
-
-      try {
-        const response = await fetch(`/api/admin/moderation/${action}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ guild_id: guildId, user_id: userId }),
-        });
-
-        let data;
-        try { data = await response.json(); }
-        catch { data = { ok: false, error: `HTTP ${response.status}` }; }
-
-        if (response.status === 401) {
-          location.reload();
-          return;
-        }
-        if (!response.ok || data.ok === false) {
-          throw new Error(data.error || `HTTP ${response.status}`);
-        }
-
-        document.querySelector("#overviewModerationServer").textContent = `${data.guild_name} — ${data.guild_id}`;
-        document.querySelector("#overviewModerationUser").textContent = data.user_id;
-        document.querySelector("#overviewModerationAction").textContent = action === "ban" ? "Ban" : "Unban";
-        document.querySelector("#overviewModerationResult").textContent = "Success";
-        moderationMsg(`${action === "ban" ? "Banned" : "Unbanned"} ${data.user_id} in ${data.guild_name}.`, "success");
-      } catch (error) {
-        document.querySelector("#overviewModerationServer").textContent = moderationGuild.selectedOptions[0]?.textContent || guildId;
-        document.querySelector("#overviewModerationUser").textContent = userId;
-        document.querySelector("#overviewModerationAction").textContent = action === "ban" ? "Ban" : "Unban";
-        document.querySelector("#overviewModerationResult").textContent = "Failed";
-        moderationMsg(error.message || String(error), "error");
-      } finally {
-        moderationBan.disabled = false;
-        moderationUnban.disabled = false;
-      }
-    }
-
-    moderationBan.addEventListener("click", () => runModeration("ban"));
-    moderationUnban.addEventListener("click", () => runModeration("unban"));
-  </script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

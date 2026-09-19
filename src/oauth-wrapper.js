@@ -151,7 +151,7 @@ async function executeModeration(request, env, action) {
   });
 }
 
-async function reconnectDashboardGatewayasync function reconnectDashboardGateway(env) {
+async function reconnectDashboardGateway(env) {
   try {
     const id = env.GATEWAY.idFromName("eternal-auth-primary-gateway");
     const gateway = env.GATEWAY.get(id);
@@ -190,7 +190,6 @@ async function adminUtilityRoute(request, env, ctx) {
   return json({ ok: false, error: "Method not allowed" }, 405);
 }
 
-function page(title, body, status = 200, cookie = null) {
 function page(title, body, status = 200, cookie = null) {
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",

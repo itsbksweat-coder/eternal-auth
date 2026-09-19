@@ -267,6 +267,7 @@ function selectScript(id) {
     $("#scriptEnabled").checked = false;
     $("#scriptFfaEnabled").checked = false;
     $("#scriptSourceStatus").textContent = "Select a script";
+    $("#rawLoaderUrl").value = "";
     $("#loaderUrl").value = "";
     $("#ffaLoaderUrl").value = "";
     return;
@@ -280,6 +281,7 @@ function selectScript(id) {
   $("#scriptEnabled").checked = !!script.enabled;
   $("#scriptFfaEnabled").checked = !!script.ffa_enabled;
   $("#scriptSourceStatus").textContent = script.content_size > 0 ? `Protected source uploaded • ${script.content_size.toLocaleString()} characters` : "No source file uploaded";
+  $("#rawLoaderUrl").value = script.loader_url || "";
   $("#loaderUrl").value = loaderLoadstring(script.loader_url);
   $("#ffaLoaderUrl").value = script.ffa_enabled && script.ffa_loader_url ? ffaLauncher(script.ffa_loader_url) : "FFA is disabled for this script";
   renderScripts(scriptCache, false);
@@ -487,6 +489,13 @@ $("#hwidUnblacklistForm").addEventListener("submit", async (e) => {
   } catch (err) { msg(err.message, "error"); }
 });
 
+
+$("#copyRawLoaderUrlBtn").onclick = async () => {
+  const url = $("#rawLoaderUrl").value.trim();
+  if (!url) return msg("Select a script first.", "error");
+  try { await navigator.clipboard.writeText(url); msg("Loader URL copied.", "success"); }
+  catch { msg("Could not copy the loader URL.", "error"); }
+};
 
 $("#copyLoaderUrlBtn").onclick = async () => {
   const url = $("#loaderUrl").value.trim();

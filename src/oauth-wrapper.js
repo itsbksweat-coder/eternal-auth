@@ -4,9 +4,12 @@ export { EternalGateway };
 
 const DISCORD_API = "https://discord.com/api/v10";
 const STATE_COOKIE = "eternal_discord_oauth_state";
-const BOT_PERMISSIONS = "268553216";
+const BOT_PERMISSIONS = "268553220";
 const DASHBOARD_OWNER_ID = "1167590082878902435";
-const BULK_BAN_LIMIT = 200;
+const MODERATION_GUILDS = new Map([
+  ["1249019782632570971", "WakeHub"],
+  ["1539142072232050690", "CleanHub"],
+]);
 
 // Existing ODY status source.
 const ODY_GUILD_ID = "1422601105149264006";
@@ -102,134 +105,53 @@ async function discordBotApi(env, path, options = {}) {
   return fetch(`${DISCORD_API}${path}`, { ...options, headers });
 }
 
-async function getServerCleanupTargets(env, guildId) {
-  if (!/^\d{5,25}$/.test(guildId)) {
-    return { ok: false, status: 400, error: "Enter a valid Discord server ID." };
-  }
-
-  const [guildResponse, meResponse] = await Promise.all([
-    discordBotApi(env, `/guilds/${guildId}`),
-    discordBotApi(env, "/users/@me"),
-  ]);
-
-  if (!guildResponse.ok) {
-    const data = await guildResponse.json().catch(() => ({}));
-    return { ok: false, status: guildResponse.status, error: data.message || `Discord HTTP ${guildResponse.status} while reading the server.` };
-  }
-  if (!meResponse.ok) {
-    const data = await meResponse.json().catch(() => ({}));
-    return { ok: false, status: meResponse.status, error: data.message || `Discord HTTP ${meResponse.status} while reading the bot account.` };
-  }
-
-  const guild = await guildResponse.json();
-  const botUser = await meResponse.json();
-  const excluded = new Set([DASHBOARD_OWNER_ID, guild.owner_id, botUser.id].filter(Boolean).map(String));
-  const userIds = [];
-  let after = "0";
-
-  while (true) {
-    const response = await discordBotApi(env, `/guilds/${guildId}/members?limit=1000&after=${encodeURIComponent(after)}`);
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      const detail = data?.message ? `: ${data.message}` : "";
-      return {
-        ok: false,
-        status: response.status,
-        error: `Could not list server members (Discord HTTP ${response.status}${detail}). Enable Server Members Intent for Eternal Auth.`,
-      };
-    }
-
-    const members = await response.json();
-    if (!Array.isArray(members) || members.length === 0) break;
-
-    for (const member of members) {
-      const id = String(member?.user?.id || "");
-      if (id && !excluded.has(id)) userIds.push(id);
-    }
-
-    if (members.length < 1000) break;
-    const lastId = String(members[members.length - 1]?.user?.id || "");
-    if (!lastId || lastId === after) break;
-    after = lastId;
-  }
-
-  return {
-    ok: true,
-    guildId,
-    guildName: String(guild.name || guildId),
-    guildOwnerId: String(guild.owner_id || ""),
-    botUserId: String(botUser.id || ""),
-    protectedIds: [...excluded],
-    userIds: [...new Set(userIds)],
-  };
-}
-
-async function previewServerCleanup(env, guildId) {
-  const targets = await getServerCleanupTargets(env, guildId);
-  if (!targets.ok) return json({ ok: false, error: targets.error }, targets.status || 400);
-  return json({
-    ok: true,
-    guild_id: targets.guildId,
-    guild_name: targets.guildName,
-    target_count: targets.userIds.length,
-    protected_ids: targets.protectedIds,
-    protected_owner_id: DASHBOARD_OWNER_ID,
-    server_owner_id: targets.guildOwnerId,
-    bot_user_id: targets.botUserId,
-  });
-}
-
-async function executeServerCleanup(request, env) {
+async function executeModeration(request, env, action) {
   const body = await readJson(request);
   const guildId = String(body.guild_id || "").trim();
-  if (String(body.confirmation || "").trim().toUpperCase() !== "BAN ALL") {
-    return json({ ok: false, error: "Type BAN ALL in the confirmation box first." }, 400);
+  const userId = String(body.user_id || "").trim();
+
+  if (!MODERATION_GUILDS.has(guildId)) {
+    return json({ ok: false, error: "Choose WakeHub or CleanHub." }, 400);
+  }
+  if (!/^\d{5,25}$/.test(userId)) {
+    return json({ ok: false, error: "Enter a valid Discord user ID." }, 400);
+  }
+  if (action === "ban" && userId === DASHBOARD_OWNER_ID) {
+    return json({ ok: false, error: "The Eternal Auth owner account is protected from dashboard bans." }, 400);
   }
 
-  const targets = await getServerCleanupTargets(env, guildId);
-  if (!targets.ok) return json({ ok: false, error: targets.error }, targets.status || 400);
-  if (!targets.userIds.length) {
-    return json({ ok: true, guild_name: targets.guildName, banned: 0, failed: 0, message: "No bannable members were found." });
-  }
+  const path = `/guilds/${guildId}/bans/${userId}`;
+  const options = action === "ban"
+    ? {
+        method: "PUT",
+        headers: { "x-audit-log-reason": "Eternal Auth dashboard ban" },
+        body: JSON.stringify({ delete_message_seconds: 0 }),
+      }
+    : {
+        method: "DELETE",
+        headers: { "x-audit-log-reason": "Eternal Auth dashboard unban" },
+      };
 
-  let banned = 0;
-  let failed = 0;
-
-  for (let i = 0; i < targets.userIds.length; i += BULK_BAN_LIMIT) {
-    const batch = targets.userIds.slice(i, i + BULK_BAN_LIMIT);
-    const response = await discordBotApi(env, `/guilds/${guildId}/bulk-ban`, {
-      method: "POST",
-      headers: { "x-audit-log-reason": "Eternal Auth dashboard server cleanup" },
-      body: JSON.stringify({ user_ids: batch, delete_message_seconds: 0 }),
-    });
+  const response = await discordBotApi(env, path, options);
+  if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      const detail = data?.message ? `: ${data.message}` : "";
-      return json({
-        ok: false,
-        error: `Cleanup stopped after ${banned} successful ban(s). Discord returned HTTP ${response.status}${detail}. Make sure Eternal Auth has Ban Members + Manage Server.`,
-        banned,
-        failed,
-      }, 502);
-    }
-
-    banned += Array.isArray(data.banned_users) ? data.banned_users.length : 0;
-    failed += Array.isArray(data.failed_users) ? data.failed_users.length : 0;
+    const detail = data?.message ? `: ${data.message}` : "";
+    return json({
+      ok: false,
+      error: `Discord HTTP ${response.status}${detail}. Make sure Eternal Auth has Ban Members permission and its role is high enough.`,
+    }, response.status >= 400 && response.status < 500 ? response.status : 502);
   }
 
   return json({
     ok: true,
-    guild_id: targets.guildId,
-    guild_name: targets.guildName,
-    attempted: targets.userIds.length,
-    banned,
-    failed,
-    protected_ids: targets.protectedIds,
+    action,
+    guild_id: guildId,
+    guild_name: MODERATION_GUILDS.get(guildId),
+    user_id: userId,
   });
 }
 
-async function reconnectDashboardGateway(env) {
+async function reconnectDashboardGatewayasync function reconnectDashboardGateway(env) {
   try {
     const id = env.GATEWAY.idFromName("eternal-auth-primary-gateway");
     const gateway = env.GATEWAY.get(id);
@@ -244,19 +166,22 @@ async function reconnectDashboardGateway(env) {
 
 async function adminUtilityRoute(request, env, ctx) {
   const url = new URL(request.url);
-  const isCleanup = url.pathname === "/api/admin/server-cleanup/preview" || url.pathname === "/api/admin/server-cleanup";
+  const isModeration =
+    url.pathname === "/api/admin/moderation/ban" ||
+    url.pathname === "/api/admin/moderation/unban";
   const isReconnect = url.pathname === "/api/admin/gateway/reconnect-now";
-  if (!isCleanup && !isReconnect) return null;
+
+  if (!isModeration && !isReconnect) return null;
 
   if (!await dashboardAdminAuthorized(request, env, ctx)) {
     return json({ ok: false, error: "Unauthorized" }, 401);
   }
 
-  if (url.pathname === "/api/admin/server-cleanup/preview" && request.method === "GET") {
-    return previewServerCleanup(env, String(url.searchParams.get("guild_id") || "").trim());
+  if (url.pathname === "/api/admin/moderation/ban" && request.method === "POST") {
+    return executeModeration(request, env, "ban");
   }
-  if (url.pathname === "/api/admin/server-cleanup" && request.method === "POST") {
-    return executeServerCleanup(request, env);
+  if (url.pathname === "/api/admin/moderation/unban" && request.method === "POST") {
+    return executeModeration(request, env, "unban");
   }
   if (url.pathname === "/api/admin/gateway/reconnect-now" && request.method === "POST") {
     return reconnectDashboardGateway(env);
@@ -265,6 +190,7 @@ async function adminUtilityRoute(request, env, ctx) {
   return json({ ok: false, error: "Method not allowed" }, 405);
 }
 
+function page(title, body, status = 200, cookie = null) {
 function page(title, body, status = 200, cookie = null) {
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",

@@ -37,6 +37,11 @@ function esc(v) {
   return String(v ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
 }
 
+function directLoaderLoadstring(url) {
+  const value = String(url || "").trim();
+  return value ? `loadstring(game:HttpGet(${JSON.stringify(value)}))()` : "";
+}
+
 function loaderLoadstring(url) {
   const value = String(url || "").trim();
   return value ? authenticatedLauncher(value) : "";
@@ -281,7 +286,7 @@ function selectScript(id) {
   $("#scriptEnabled").checked = !!script.enabled;
   $("#scriptFfaEnabled").checked = !!script.ffa_enabled;
   $("#scriptSourceStatus").textContent = script.content_size > 0 ? `Protected source uploaded • ${script.content_size.toLocaleString()} characters` : "No source file uploaded";
-  $("#rawLoaderUrl").value = script.loader_url || "";
+  $("#rawLoaderUrl").value = directLoaderLoadstring(script.loader_url);
   $("#loaderUrl").value = loaderLoadstring(script.loader_url);
   $("#ffaLoaderUrl").value = script.ffa_enabled && script.ffa_loader_url ? ffaLauncher(script.ffa_loader_url) : "FFA is disabled for this script";
   renderScripts(scriptCache, false);
@@ -491,10 +496,10 @@ $("#hwidUnblacklistForm").addEventListener("submit", async (e) => {
 
 
 $("#copyRawLoaderUrlBtn").onclick = async () => {
-  const url = $("#rawLoaderUrl").value.trim();
-  if (!url) return msg("Select a script first.", "error");
-  try { await navigator.clipboard.writeText(url); msg("Loader URL copied.", "success"); }
-  catch { msg("Could not copy the loader URL.", "error"); }
+  const loader = $("#rawLoaderUrl").value.trim();
+  if (!loader) return msg("Select a script first.", "error");
+  try { await navigator.clipboard.writeText(loader); msg("Direct loader copied.", "success"); }
+  catch { msg("Could not copy the direct loader.", "error"); }
 };
 
 $("#copyLoaderUrlBtn").onclick = async () => {

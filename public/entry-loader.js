@@ -14,7 +14,6 @@ local function __ea_client_envs()
 end
 
 local function __ea_disable_clipboard()
-__ea_guard_logger_files()
     local names={
         "setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
         "setrbxclipboard","copyclipboard","clipboardset","setclip",
@@ -106,6 +105,23 @@ local function __ea_obviously_hooked(fn)
     return ok and result==true
 end
 
+local function __ea_hwid_spoofed()
+    for _,env in ipairs(__ea_client_envs()) do
+        for _,name in ipairs({"RbxGetIdentity","__Identify"}) do
+            local ok,fn=pcall(function() return env[name] end)
+            if ok and type(fn)=="function" then
+                if __ea_obviously_hooked(fn) then return true end
+                local okValue,value=pcall(fn)
+                if okValue and type(value)=="string" and #value>=32 and value:match("^[a-fA-F0-9]+$") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+__ea_guard_logger_files()
 __ea_disable_clipboard()
 `;
 }
@@ -133,7 +149,7 @@ local __ea_hook_score=0
 if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
 if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
-if __ea_known_logger_file or __ea_hook_score>=3 then stop() return end
+if __ea_known_logger_file or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
 e.script_key=k
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
@@ -163,7 +179,7 @@ local __ea_hook_score=0
 if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
 if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
-if __ea_known_logger_file or __ea_hook_score>=3 then stop() return end
+if __ea_known_logger_file or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
 local f=loadstring(r.Body or r.body or "")

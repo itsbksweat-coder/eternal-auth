@@ -462,7 +462,7 @@ export default {
           headers: {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "GET,POST,OPTIONS",
-            "access-control-allow-headers": "content-type,authorization",
+            "access-control-allow-headers": "content-type,authorization,x-eternal-device,x-eternal-ticket,x-eternal-execute",
             "access-control-max-age": "86400",
           },
         });
@@ -500,11 +500,11 @@ export default {
         return handleFfaPublicLoader(request, env, ffaLoaderMatch[1].toLowerCase());
       }
 
-      if (url.pathname === "/api/v1/loader" && request.method === "GET") {
+      if (url.pathname === "/api/v1/loader" && request.method === "POST") {
         return handleProtectedLoader(request, env, ctx);
       }
 
-      if (url.pathname === "/api/v1/ffa-loader" && request.method === "GET") {
+      if (url.pathname === "/api/v1/ffa-loader" && request.method === "POST") {
         return handleFfaProtectedLoader(request, env);
       }
 
@@ -660,6 +660,49 @@ async function safeEqualText(a, b) {
   let diff = 0;
   for (let i = 0; i < aHash.length; i++) diff |= aHash[i] ^ bHash[i];
   return diff === 0;
+}
+
+async function loaderClientIpHash(request) {
+  return sha256Hex(request.headers.get("cf-connecting-ip") || "");
+}
+
+async function createLoaderTicket(env, request, { licenseId, scriptId, deviceHash, ffa = false }) {
+  if (!env.CONFIG_SECRET) throw new Error("CONFIG_SECRET is not configured");
+  const claims = {
+    l: String(licenseId || ""),
+    s: String(scriptId || ""),
+    d: String(deviceHash || ""),
+    e: now() + 20,
+    i: await loaderClientIpHash(request),
+    f: ffa ? 1 : 0,
+  };
+  const body = bytesToBase64Url(enc.encode(JSON.stringify(claims)));
+  const signature = bytesToBase64Url(await hmacBytes(env.CONFIG_SECRET, `loader-ticket:${body}`));
+  return `${body}.${signature}`;
+}
+
+async function verifyLoaderTicket(env, request, token, expected) {
+  if (!env.CONFIG_SECRET || !token) return false;
+  const parts = String(token).split(".");
+  if (parts.length !== 2) return false;
+  const [body, signature] = parts;
+  const expectedSignature = bytesToBase64Url(await hmacBytes(env.CONFIG_SECRET, `loader-ticket:${body}`));
+  if (!await safeEqualText(signature, expectedSignature)) return false;
+
+  let claims;
+  try {
+    claims = JSON.parse(dec.decode(base64UrlToBytes(body)));
+  } catch {
+    return false;
+  }
+
+  if (!claims || Number(claims.e) < now()) return false;
+  if (String(claims.l || "") !== String(expected.licenseId || "")) return false;
+  if (String(claims.s || "") !== String(expected.scriptId || "")) return false;
+  if (String(claims.d || "") !== String(expected.deviceHash || "")) return false;
+  if (Number(claims.f || 0) !== (expected.ffa ? 1 : 0)) return false;
+  if (String(claims.i || "") !== await loaderClientIpHash(request)) return false;
+  return true;
 }
 
 async function configCryptoKey(env) {
@@ -990,7 +1033,7 @@ async function handleSecurityReport(request, env) {
   const deviceId = cleanText(body?.device_id, 512);
   const reason = cleanText(body?.reason, 32);
   if (!key || !deviceId) return publicJson({ ok: false, error: "Missing key or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy", "hwid_spoof"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
   const license = await findLicenseByKey(env, key);
   const hash = await hashDevice(env, deviceId);
   // A report may only blacklist the authenticated key's already-bound device.
@@ -1010,7 +1053,7 @@ async function handleFfaSecurityReport(request, env) {
   const reason = cleanText(body?.reason, 32);
   const token = cleanText(body?.token, 2048);
   if (!deviceId || !token) return publicJson({ ok: false, error: "Missing report proof or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy", "hwid_spoof"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
 
   const hash = await hashDevice(env, deviceId);
   const claims = await verifyFfaReportToken(env, token, hash);
@@ -1074,6 +1117,9 @@ async function handleProtectedLoader(request, env, ctx) {
   const url = new URL(request.url);
   const { key, deviceId } = sourceCredentials(request);
   const scriptId = cleanText(url.searchParams.get("script_id"), 128);
+  const loaderTicket = cleanText(request.headers.get("x-eternal-ticket"), 4096);
+
+  if (!hasLoaderExecutionIntent(request) || !loaderTicket) return deniedSource();
 
   if (!key) {
     return deniedSource();
@@ -1198,6 +1244,13 @@ async function handleProtectedLoader(request, env, ctx) {
     const assignedPanel = await getPanel(env, row.guild_id, row.panel_id);
     if (!assignedPanel || assignedPanel.script_id !== script.id) return deniedSource();
   }
+
+  if (!await verifyLoaderTicket(env, request, loaderTicket, {
+    licenseId: row.id,
+    scriptId: script.id,
+    deviceHash,
+    ffa: false,
+  })) return deniedSource();
 
   const executionLog = env.DB.prepare("INSERT INTO executions (guild_id, license_id, occurred_at) VALUES (?, ?, ?)")
     .bind(row.guild_id, row.id, timestamp)
@@ -1345,7 +1398,14 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
       headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
     });
   }
-  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id), {
+  const deviceHash = await hashDevice(env, credentials.deviceId);
+  const loaderTicket = await createLoaderTicket(env, request, {
+    licenseId: license.id,
+    scriptId: script.id,
+    deviceHash,
+    ffa: false,
+  });
+  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, false, "", loaderTicket), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "Authorization, X-Eternal-Device", "x-content-type-options": "nosniff" },
   });
@@ -1374,7 +1434,13 @@ async function handleFfaPublicLoader(request, env, loaderId) {
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
   });
   const reportToken = await createFfaReportToken(env, guild.guild_id, script.id, deviceHash);
-  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true, reportToken), {
+  const loaderTicket = await createLoaderTicket(env, request, {
+    licenseId: "FFA",
+    scriptId: script.id,
+    deviceHash,
+    ffa: true,
+  });
+  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true, reportToken, loaderTicket), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "X-Eternal-Device", "x-content-type-options": "nosniff" },
   });
@@ -1384,7 +1450,8 @@ async function handleFfaProtectedLoader(request, env) {
   const url = new URL(request.url);
   const { deviceId } = sourceCredentials(request);
   const scriptId = cleanText(url.searchParams.get("script_id"), 128);
-  if (!deviceId || !scriptId) return deniedSource();
+  const loaderTicket = cleanText(request.headers.get("x-eternal-ticket"), 4096);
+  if (!hasLoaderExecutionIntent(request) || !loaderTicket || !deviceId || !scriptId) return deniedSource();
   const script = await env.DB.prepare("SELECT * FROM scripts WHERE id = ? LIMIT 1")
     .bind(scriptId)
     .first();
@@ -1393,6 +1460,12 @@ async function handleFfaProtectedLoader(request, env) {
   if (!guild?.active) return deniedSource();
   const deviceHash = await hashDevice(env, deviceId);
   if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
+  if (!await verifyLoaderTicket(env, request, loaderTicket, {
+    licenseId: "FFA",
+    scriptId: script.id,
+    deviceHash,
+    ffa: true,
+  })) return deniedSource();
   return new Response(script.content, {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "X-Eternal-Device", "x-eternal-auth": "ffa", "x-eternal-script-id": script.id, "x-content-type-options": "nosniff" },
@@ -1413,7 +1486,7 @@ function sourceCredentials(request) {
 }
 
 
-function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "") {
+function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "", loaderTicket = "") {
   const apiUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa-loader" : "loader"}?script_id=${encodeURIComponent(scriptId)}`;
   const keySetup = ffa
     ? `local key="FFA"`
@@ -1432,9 +1505,10 @@ if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to a
             Body=H:JSONEncode({key=tostring(key),device_id=tostring(d),reason=reason})
         })
     end`;
-  const protectedUrl = ffa
-    ? `local u="${apiUrl}&device_id="..H:UrlEncode(tostring(d))`
-    : `local u="${apiUrl}&key="..H:UrlEncode(tostring(key)).."&device_id="..H:UrlEncode(tostring(d))`;
+  const protectedUrl = `local u="${apiUrl}"`;
+  const protectedHeaders = ffa
+    ? `local __ea_source_headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`
+    : `local __ea_source_headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`;
   return `-- Eternal Auth fast bootstrap + nine-layer source leak guard
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
@@ -1879,9 +1953,27 @@ if __ea_known_logger_file or __ea_hook_score>=3 then
     return
 end
 
+local function __ea_hwid_spoofed()
+    for _,env in ipairs(__ea_envs()) do
+        for _,name in ipairs({"RbxGetIdentity","__Identify"}) do
+            local ok,fn=pcall(function() return env[name] end)
+            if ok and type(fn)=="function" then
+                if __ea_obviously_hooked(fn) then return true end
+                local okValue,value=pcall(fn)
+                if okValue and type(value)=="string" and #value>=32 and value:match("^[a-fA-F0-9]+$") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+if __ea_hwid_spoofed() then __ea_block("hwid_spoof") return end
+
 ${protectedUrl}
+${protectedHeaders}
 if not __ea_request then K("Eternal Auth requires an HTTP request function.") return end
-local verified,result=pcall(__ea_request,{Url=u,Method="GET"})
+local verified,result=pcall(__ea_request,{Url=u,Method="POST",Headers=__ea_source_headers})
 if not verified or not result then K("Eternal Auth connection failed.") return end
 local code=tonumber(result.StatusCode or result.status_code or 0)
 local s=result.Body or result.body or ""

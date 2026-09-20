@@ -662,8 +662,19 @@ async function safeEqualText(a, b) {
   return diff === 0;
 }
 
-async function loaderClientIpHash(request) {
-  return sha256Hex(request.headers.get("cf-connecting-ip") || "");
+const usedLoaderTickets = new Map();
+
+async function loaderClientFingerprint(request) {
+  const ip = request.headers.get("cf-connecting-ip") || "";
+  const ua = request.headers.get("user-agent") || "";
+  return sha256Hex(`${ip}\n${ua}`);
+}
+
+function pruneUsedLoaderTickets() {
+  const time = Date.now();
+  for (const [key, expiresAt] of usedLoaderTickets) {
+    if (expiresAt <= time) usedLoaderTickets.delete(key);
+  }
 }
 
 async function createLoaderTicket(env, request, { licenseId, scriptId, deviceHash, ffa = false }) {
@@ -673,7 +684,8 @@ async function createLoaderTicket(env, request, { licenseId, scriptId, deviceHas
     s: String(scriptId || ""),
     d: String(deviceHash || ""),
     e: now() + 20,
-    i: await loaderClientIpHash(request),
+    i: await loaderClientFingerprint(request),
+    n: bytesToBase64Url(crypto.getRandomValues(new Uint8Array(12))),
     f: ffa ? 1 : 0,
   };
   const body = bytesToBase64Url(enc.encode(JSON.stringify(claims)));
@@ -701,7 +713,15 @@ async function verifyLoaderTicket(env, request, token, expected) {
   if (String(claims.s || "") !== String(expected.scriptId || "")) return false;
   if (String(claims.d || "") !== String(expected.deviceHash || "")) return false;
   if (Number(claims.f || 0) !== (expected.ffa ? 1 : 0)) return false;
-  if (String(claims.i || "") !== await loaderClientIpHash(request)) return false;
+  if (String(claims.i || "") !== await loaderClientFingerprint(request)) return false;
+
+  // Best-effort replay resistance across requests handled by the same Worker
+  // isolate. The signed ticket is already short-lived and client-bound; this
+  // additionally makes a captured ticket single-use on the common hot path.
+  pruneUsedLoaderTickets();
+  const replayKey = await sha256Hex(String(token));
+  if (usedLoaderTickets.has(replayKey)) return false;
+  usedLoaderTickets.set(replayKey, Date.now() + 30_000);
   return true;
 }
 
@@ -834,6 +854,25 @@ function ffaLoaderUrlForScript(guild, script) {
   if (!guild?.base_url || !script?.loader_id) return null;
   return `${String(guild.base_url).replace(/\/$/, "")}/files/v4/ffa/${script.loader_id}.lua`;
 }
+
+function safeScriptRecord(guild, script) {
+  if (!script) return null;
+  return {
+    id: script.id,
+    guild_id: script.guild_id,
+    loader_id: script.loader_id,
+    loader_url: guild ? loaderUrlForScript(guild, script) : null,
+    ffa_loader_url: guild ? ffaLoaderUrlForScript(guild, script) : null,
+    name: script.name,
+    version: script.version,
+    enabled: !!script.enabled,
+    ffa_enabled: !!script.ffa_enabled,
+    content_size: String(script.content || "").length,
+    created_at: script.created_at,
+    updated_at: script.updated_at,
+  };
+}
+
 
 async function getScriptsForGuild(env, guildId, enabledOnly = false) {
   const cacheKey = `${guildId}:${enabledOnly ? "enabled" : "all"}`;
@@ -1532,8 +1571,10 @@ if not d or tostring(d)=="" then K("Missing HWID") return end
 local __ea_request=request or http_request or (syn and syn.request) or (http and http.request)
 local __ea_report_url=${JSON.stringify(`${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`)}
 local __ea_stopped=false
-local __ea_protected_source=nil
+local __ea_source_fragments={}
+local __ea_source_ready=false
 local __ea_scrub_gui=nil
+local __ea_loadstring=loadstring
 local function __ea_block(reason)
     if __ea_stopped then return "Blacklisted" end
     __ea_stopped=true
@@ -1543,19 +1584,35 @@ ${reportAttempt}
     return "Blacklisted"
 end
 
--- Match actual delivered source instead of banning arbitrary long UI text.
--- A 96-byte exact fragment is long enough to avoid ordinary-label matches while
--- still catching viewers that split the source across several GUI pages.
+-- Keep only sampled source fingerprints after compilation. Retaining the full
+-- source string would make getgc/environment dumps unnecessarily valuable.
 local __ea_min_fragment=96
-local function __ea_source_like(v)
-    if type(v)~="string" or not __ea_protected_source then return false end
-    local src=__ea_protected_source
-    if #src>=16 and string.find(v,src,1,true) then return true end
-    if #v>=__ea_min_fragment and string.find(src,v,1,true) then return true end
-    if #v>=__ea_min_fragment and #src>=__ea_min_fragment then
-        for pos=1,math.min(#__ea_protected_source-__ea_min_fragment+1,65536),48 do
-            if string.find(v,string.sub(src,pos,pos+__ea_min_fragment-1),1,true) then return true end
+local function __ea_capture_source(src)
+    __ea_source_fragments={}
+    __ea_source_ready=false
+    if type(src)~="string" or src=="" then return end
+    if #src<__ea_min_fragment then
+        table.insert(__ea_source_fragments,src)
+    else
+        local wanted=48
+        local maxStart=math.max(1,#src-__ea_min_fragment+1)
+        local step=math.max(__ea_min_fragment,math.floor(maxStart/wanted))
+        local pos=1
+        while pos<=maxStart and #__ea_source_fragments<wanted do
+            table.insert(__ea_source_fragments,string.sub(src,pos,pos+__ea_min_fragment-1))
+            pos=pos+step
         end
+        local tail=string.sub(src,math.max(1,#src-__ea_min_fragment+1))
+        if tail~="" then table.insert(__ea_source_fragments,tail) end
+    end
+    __ea_source_ready=#__ea_source_fragments>0
+end
+
+local function __ea_source_like(v)
+    if type(v)~="string" or not __ea_source_ready then return false end
+    for _,fragment in ipairs(__ea_source_fragments) do
+        if fragment~="" and string.find(v,fragment,1,true) then return true end
+        if #v>=16 and #v<__ea_min_fragment and string.find(fragment,v,1,true) then return true end
     end
     return false
 end
@@ -1721,7 +1778,7 @@ local __ea_text_roots={}
 local __ea_text_watched={}
 local function __ea_gui_source_like(value)
     if __ea_source_like(value) then return true end
-    if type(value)~="string" or not __ea_protected_source or #value<8 then return false end
+    if type(value)~="string" or not __ea_source_ready or #value<8 then return false end
     table.insert(__ea_gui_fragments,value)
     __ea_gui_fragment_bytes=__ea_gui_fragment_bytes+#value
     while #__ea_gui_fragments>24 or __ea_gui_fragment_bytes>262144 do
@@ -1834,7 +1891,9 @@ end
 local __ea_spy_signatures={
     "http spy","http logger","httpspy","http_spy","httplogger",
     "remote spy","remote logger","remotespy","simple spy","simplespy",
-    "source viewer","script viewer","lua viewer","hydroxide"
+    "source viewer","script viewer","lua viewer","hydroxide",
+    "websocket spy","websocket logger","ws spy","ws logger","network logger",
+    "packet logger","source dumper","script dumper","decompiler","hook spy","hookspy"
 }
 local function __ea_spy_like(v)
     if type(v)~="string" then return false end
@@ -1886,7 +1945,10 @@ local function __ea_install_environment_guard(env,name)
     pcall(function() if __ea_hook_fn then __ea_hook_fn(old,wrap) end end)
 end
 for _,env in ipairs(__ea_logger_envs) do
-    for _,name in ipairs({"getscriptclosure","getscriptbytecode","dumpstring","decompile"}) do
+    for _,name in ipairs({
+        "getscriptclosure","getscriptbytecode","getscriptfunction","getscriptfunc",
+        "dumpstring","decompile","getsenv","getscriptfromthread","getscriptfromfunction"
+    }) do
         pcall(__ea_install_environment_guard,env,name)
     end
 end
@@ -1942,10 +2004,31 @@ local function __ea_websocket_hook_score()
     return score
 end
 
+local function __ea_http_alias_hook_score()
+    local score=0
+    local seen={}
+    local function check(fn)
+        if type(fn)=="function" and not seen[fn] then
+            seen[fn]=true
+            if __ea_obviously_hooked(fn) then score=score+1 end
+        end
+    end
+    for _,env in ipairs(__ea_envs()) do
+        check(env.request)
+        check(env.http_request)
+        check(env.httprequest)
+        if type(env.syn)=="table" then check(env.syn.request) end
+        if type(env.http)=="table" then check(env.http.request) end
+    end
+    return math.min(score,2)
+end
+
 local __ea_hook_score=0
-if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
 if __ea_obviously_hooked(__ea_request) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
+if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
+__ea_hook_score=__ea_hook_score+__ea_http_alias_hook_score()
 __ea_hook_score=__ea_hook_score+__ea_websocket_hook_score()
 
 if __ea_known_logger_file or __ea_hook_score>=3 then
@@ -1983,7 +2066,7 @@ if code~=200 then
     return
 end
 if __ea_stopped then return end
-__ea_protected_source=s
+__ea_capture_source(s)
 -- Catch source placed into a GUI immediately before the protected response was
 -- assigned, then keep property watchers active for later page changes.
 for _,root in ipairs(__ea_text_roots) do
@@ -1993,9 +2076,17 @@ for _,root in ipairs(__ea_text_roots) do
     end end)
 end
 if __ea_stopped then return end
-local f,err=loadstring(s)
+
+local f,err=__ea_loadstring(s)
+pcall(function()
+    result.Body=""
+    result.body=""
+end)
+s=nil
 if not f then K("Eternal Auth loader error: "..tostring(err)) return end
-f()`;
+local okRun,runErr=pcall(f)
+f=nil
+if not okRun then error(runErr,0) end`;
 }
 
 
@@ -2717,20 +2808,7 @@ async function handleAdminApi(request, env, url, ctx) {
     if (!guild) return json({ ok: false, error: "Unknown guild" }, 404);
     await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
     const scripts = await getScriptsForGuild(env, guildId, false);
-    const safeScripts = scripts.map((script) => ({
-      id: script.id,
-      guild_id: script.guild_id,
-      loader_id: script.loader_id,
-      loader_url: loaderUrlForScript(guild, script),
-      ffa_loader_url: ffaLoaderUrlForScript(guild, script),
-      name: script.name,
-      version: script.version,
-      enabled: !!script.enabled,
-      ffa_enabled: !!script.ffa_enabled,
-      content_size: String(script.content || "").length,
-      created_at: script.created_at,
-      updated_at: script.updated_at,
-    }));
+    const safeScripts = scripts.map((script) => safeScriptRecord(guild, script));
     return json({ ok: true, scripts: safeScripts });
   }
 
@@ -2765,7 +2843,7 @@ async function handleAdminApi(request, env, url, ctx) {
 
     const script = await env.DB.prepare("SELECT * FROM scripts WHERE id = ?").bind(id).first();
     await audit(env, guildId, "admin.create_script", "dashboard", id, { name, version, enabled: !!enabled, source_file_name: sourceFileName });
-    return json({ ok: true, script: { ...script, enabled: !!script.enabled, ffa_enabled: !!script.ffa_enabled, loader_url: loaderUrlForScript(guild, script), ffa_loader_url: ffaLoaderUrlForScript(guild, script) } }, 201);
+    return json({ ok: true, script: safeScriptRecord(guild, script) }, 201);
   }
 
   const adminScriptMatch = url.pathname.match(/^\/api\/admin\/scripts\/([^/]+)$/);
@@ -2797,7 +2875,7 @@ async function handleAdminApi(request, env, url, ctx) {
     if (guild) await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
     const script = await ensureScriptLoaderId(env, await env.DB.prepare("SELECT * FROM scripts WHERE id = ?").bind(scriptId).first());
     await audit(env, existing.guild_id, "admin.update_script", "dashboard", scriptId, { name, version, enabled: !!enabled, ffa_enabled: !!ffaEnabled, source_file_name: sourceFileName });
-    return json({ ok: true, script: { ...script, enabled: !!script.enabled, ffa_enabled: !!script.ffa_enabled, loader_url: guild ? loaderUrlForScript(guild, script) : null, ffa_loader_url: guild ? ffaLoaderUrlForScript(guild, script) : null } });
+    return json({ ok: true, script: safeScriptRecord(guild, script) });
   }
 
   if (adminScriptMatch && request.method === "DELETE") {
@@ -2831,7 +2909,7 @@ async function handleAdminApi(request, env, url, ctx) {
       created_at: guild.created_at,
       updated_at: guild.updated_at,
     } : null;
-    return json({ ok: true, guild: safeGuild, script });
+    return json({ ok: true, guild: safeGuild, script: safeScriptRecord(guild, script) });
   }
 
   if (url.pathname === "/api/admin/config" && request.method === "PUT") {

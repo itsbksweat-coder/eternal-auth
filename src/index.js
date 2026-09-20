@@ -1573,13 +1573,37 @@ for _,env in ipairs(__ea_envs()) do
     end
 end
 
--- Layer 4: file-output sinks. Normal small/non-source writes remain usable.
+-- Layer 4: file-output sinks and known logger files.
+-- The supplied HTTP spy writes responses to these fixed files before our code
+-- receives control again, so block those paths even before source matching is possible.
+local __ea_blocked_logger_files={
+    ["testestzen.txt"]=true,
+    ["sabcom_hub.lua"]=true
+}
+local function __ea_blocked_path(path)
+    local p=string.lower(tostring(path or "")):gsub("\\","/")
+    local base=p:match("([^/]+)$") or p
+    return __ea_blocked_logger_files[base]==true
+end
+local __ea_known_logger_file=false
+
 for _,env in ipairs(__ea_envs()) do
+    pcall(function()
+        local rawIs=env.isfile
+        if type(rawIs)=="function" then
+            for name in pairs(__ea_blocked_logger_files) do
+                local ok,exists=pcall(rawIs,name)
+                if ok and exists then __ea_known_logger_file=true end
+            end
+        end
+    end)
+
     for _,name in ipairs({"writefile","appendfile"}) do
         pcall(function()
-            local old=rawget(env,name)
+            local old=rawget(env,name) or env[name]
             if type(old)~="function" then return end
             local wrap=function(path,data,...)
+                if __ea_blocked_path(path) then return nil end
                 if __ea_source_like(data) then return __ea_block("file") end
                 return old(path,data,...)
             end
@@ -1588,6 +1612,30 @@ for _,env in ipairs(__ea_envs()) do
             pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
         end)
     end
+
+    pcall(function()
+        local old=rawget(env,"readfile") or env.readfile
+        if type(old)=="function" then
+            local wrap=function(path,...)
+                if __ea_blocked_path(path) then return "" end
+                return old(path,...)
+            end
+            env.readfile=wrap
+            __ea_track(env,"readfile",wrap)
+        end
+    end)
+
+    pcall(function()
+        local old=rawget(env,"isfile") or env.isfile
+        if type(old)=="function" then
+            local wrap=function(path,...)
+                if __ea_blocked_path(path) then return false end
+                return old(path,...)
+            end
+            env.isfile=wrap
+            __ea_track(env,"isfile",wrap)
+        end
+    end)
 end
 
 -- Layer 5: TextBox/TextLabel/TextButton source dumping. The metamethod catches
@@ -1781,8 +1829,9 @@ task.spawn(function()
     end
 end)
 
--- Reject the simple logger pattern where native request/loadstring/require
--- functions were replaced with ordinary Lua closures before Eternal Auth ran.
+-- Reject the logger pattern where native request/loadstring/require or
+-- WebSocket constructors were replaced before Eternal Auth ran. Heuristic
+-- matches stop this execution only; they do not permanently blacklist a HWID.
 local function __ea_obviously_hooked(fn)
     if type(fn)~="function" then return false end
     local ok,result=pcall(function()
@@ -1792,9 +1841,43 @@ local function __ea_obviously_hooked(fn)
     end)
     return ok and result==true
 end
-if __ea_obviously_hooked(loadstring) then __ea_block("integrity") return end
-if __ea_obviously_hooked(__ea_request) then __ea_block("http_spy") return end
-if type(require)=="function" and __ea_obviously_hooked(require) then __ea_block("environment") return end
+
+local function __ea_websocket_hook_score()
+    local score=0
+    local seen={}
+    local function checkTable(t)
+        if type(t)~="table" or seen[t] then return end
+        seen[t]=true
+        for _,name in ipairs({"connect","Connect","new","New","Create"}) do
+            local fn=t[name]
+            if type(fn)=="function" and __ea_obviously_hooked(fn) then
+                score=1
+                return
+            end
+        end
+    end
+    for _,env in ipairs(__ea_envs()) do
+        checkTable(env.WebSocket)
+        checkTable(env.websocket)
+        checkTable(env.Websocket)
+        if type(env.syn)=="table" then
+            checkTable(env.syn.websocket)
+            checkTable(env.syn.WebSocket)
+        end
+    end
+    return score
+end
+
+local __ea_hook_score=0
+if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(__ea_request) then __ea_hook_score=__ea_hook_score+2 end
+if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
+__ea_hook_score=__ea_hook_score+__ea_websocket_hook_score()
+
+if __ea_known_logger_file or __ea_hook_score>=3 then
+    K("Security logger detected.")
+    return
+end
 
 ${protectedUrl}
 if not __ea_request then K("Eternal Auth requires an HTTP request function.") return end

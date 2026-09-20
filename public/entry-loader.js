@@ -105,6 +105,75 @@ local function __ea_obviously_hooked(fn)
     return ok and result==true
 end
 
+local function __ea_http_hook_score()
+    local score=0
+    local seen={}
+    local function check(fn)
+        if type(fn)=="function" and not seen[fn] then
+            seen[fn]=true
+            if __ea_obviously_hooked(fn) then score=score+1 end
+        end
+    end
+    for _,env in ipairs(__ea_client_envs()) do
+        check(env.request)
+        check(env.http_request)
+        check(env.httprequest)
+        if type(env.syn)=="table" then check(env.syn.request) end
+        if type(env.http)=="table" then check(env.http.request) end
+    end
+    return math.min(score,2)
+end
+
+local function __ea_websocket_hook_score()
+    local score=0
+    local seen={}
+    local function checkTable(t)
+        if type(t)~="table" or seen[t] then return end
+        seen[t]=true
+        for _,name in ipairs({"connect","Connect","new","New","Create"}) do
+            local fn=t[name]
+            if type(fn)=="function" and __ea_obviously_hooked(fn) then
+                score=1
+                return
+            end
+        end
+    end
+    for _,env in ipairs(__ea_client_envs()) do
+        checkTable(env.WebSocket)
+        checkTable(env.websocket)
+        checkTable(env.Websocket)
+        if type(env.syn)=="table" then
+            checkTable(env.syn.websocket)
+            checkTable(env.syn.WebSocket)
+        end
+    end
+    return score
+end
+
+local __ea_spy_signatures={
+    "http spy","http logger","httpspy","http_spy","httplogger",
+    "websocket spy","websocket logger","ws spy","ws logger",
+    "network logger","packet logger","source viewer","script viewer",
+    "source dumper","script dumper","decompiler","hook spy","hookspy"
+}
+local function __ea_spy_env_detected()
+    for _,env in ipairs(__ea_client_envs()) do
+        local ok,found=pcall(function()
+            for name,value in pairs(env) do
+                local lowered=string.lower(tostring(name))
+                for _,sig in ipairs(__ea_spy_signatures) do
+                    if string.find(lowered,sig,1,true) and (type(value)=="function" or type(value)=="table") then
+                        return true
+                    end
+                end
+            end
+            return false
+        end)
+        if ok and found then return true end
+    end
+    return false
+end
+
 local function __ea_hwid_spoofed()
     for _,env in ipairs(__ea_client_envs()) do
         for _,name in ipairs({"RbxGetIdentity","__Identify"}) do
@@ -145,17 +214,26 @@ if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
 ${clientHardeningLua()}
+local __ea_loadstring=loadstring
 local __ea_hook_score=0
-if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
 if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
-if __ea_known_logger_file or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
+if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
+__ea_hook_score=__ea_hook_score+__ea_http_hook_score()+__ea_websocket_hook_score()
+if __ea_known_logger_file or __ea_spy_env_detected() or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
 e.script_key=k
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
-local f=loadstring(r.Body or r.body or "")
+local f=__ea_loadstring(r.Body or r.body or "")
+pcall(function()
+    r.Body=""
+    r.body=""
+end)
 if not f then stop() return end
-f()`;
+local okRun,runErr=pcall(f)
+f=nil
+if not okRun then error(runErr,0) end`;
 }
 
 export function ffaLauncher(url) {
@@ -175,14 +253,23 @@ if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
 ${clientHardeningLua()}
+local __ea_loadstring=loadstring
 local __ea_hook_score=0
-if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
 if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
-if __ea_known_logger_file or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
+if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
+__ea_hook_score=__ea_hook_score+__ea_http_hook_score()+__ea_websocket_hook_score()
+if __ea_known_logger_file or __ea_spy_env_detected() or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
-local f=loadstring(r.Body or r.body or "")
+local f=__ea_loadstring(r.Body or r.body or "")
+pcall(function()
+    r.Body=""
+    r.body=""
+end)
 if not f then stop() return end
-f()`;
+local okRun,runErr=pcall(f)
+f=nil
+if not okRun then error(runErr,0) end`;
 }

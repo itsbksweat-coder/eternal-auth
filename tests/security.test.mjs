@@ -128,7 +128,9 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'bad'}),300);
   const lua=api.buildBootstrapSource('https://auth.test','s');
   assert.match(lua,/https:\/\/auth.test\/api\/v1\/security\/report/);
-  assert.match(lua,/__ea_protected_source=s/);
+  assert.match(lua,/__ea_capture_source\(s\)/);
+  assert.match(lua,/s=nil/);
+  assert.doesNotMatch(lua,/__ea_protected_source=s/);
   assert.doesNotMatch(lua,/\$\{/);
   const extractionLayer=lua.slice(lua.indexOf('-- Layer 8:'),lua.indexOf('-- Layer 9:'));
   assert.match(extractionLayer,/decompile|getscriptbytecode/);
@@ -209,6 +211,24 @@ test('admin can remove an FFA HWID blacklist by pasting the raw device ID', asyn
   assert.equal(response.status,200);
   assert.equal((await response.json()).removed,true);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
+});
+
+test('admin script responses never expose protected content', async () => {
+  const {env}=await fixture();
+  let req=new Request('https://auth.test/api/admin/scripts?guild_id=123456789012345678');
+  let response=await api.handleAdminApi(req,env,new URL(req.url),{waitUntil(){}});
+  assert.equal(response.status,200);
+  let body=await response.json();
+  assert.equal(body.scripts.length,1);
+  assert.equal(body.scripts[0].content,undefined);
+  assert.equal(body.scripts[0].content_size,'SECRET_PROTECTED_CONTENT'.length);
+
+  req=new Request('https://auth.test/api/admin/config?guild_id=123456789012345678');
+  response=await api.handleAdminApi(req,env,new URL(req.url),{waitUntil(){}});
+  assert.equal(response.status,200);
+  body=await response.json();
+  assert.equal(body.script.content,undefined);
+  assert.equal(body.script.content_size,'SECRET_PROTECTED_CONTENT'.length);
 });
 
 test('panel-scoped license cannot load a script attached to another panel', async () => {

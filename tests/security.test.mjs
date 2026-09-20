@@ -24,19 +24,79 @@ async function fixture() {
   db.prepare("INSERT INTO panels (id,guild_id,name,script_id,active,created_at,updated_at) VALUES ('p','123456789012345678','Main Panel','s',1,0,0)").run();
   return { db, env };
 }
-const request = (params) => new Request('https://auth.test/api/v1/loader?' + new URLSearchParams(params),{headers:{'x-eternal-execute':'1'}});
+const TEST_IP = '203.0.113.10';
+const directRequest = (params, extraHeaders = {}) => new Request('https://auth.test/api/v1/loader?' + new URLSearchParams(params), {
+  method: 'POST',
+  headers: {'x-eternal-execute':'1','cf-connecting-ip':TEST_IP,...extraHeaders},
+});
 const report = (body) => new Request('https://auth.test/api/v1/security/report', { method: 'POST', body: JSON.stringify(body) });
+
+function ticketFromBootstrap(lua) {
+  return lua.match(/\["X-Eternal-Ticket"\]=\"([^\"]+)\"/)?.[1] || null;
+}
+
+async function secureProtectedResponse(env, { key='valid-key', deviceId='a', scriptId='s', loaderId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ip=TEST_IP } = {}) {
+  const stage1 = new Request(`https://auth.test/files/v4/loaders/${loaderId}.lua`, {
+    headers: {
+      authorization: `Bearer ${key}`,
+      'x-eternal-device': deviceId,
+      'x-eternal-execute': '1',
+      'cf-connecting-ip': ip,
+    },
+  });
+  const bootstrapResponse = await api.handlePublicLoader(stage1, env, loaderId, {waitUntil(){}});
+  if (bootstrapResponse.status !== 200) return bootstrapResponse;
+  const bootstrap = await bootstrapResponse.text();
+  const ticket = ticketFromBootstrap(bootstrap);
+  assert.ok(ticket, 'bootstrap should contain a signed loader ticket');
+  const stage2 = new Request(`https://auth.test/api/v1/loader?script_id=${encodeURIComponent(scriptId)}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${key}`,
+      'x-eternal-device': deviceId,
+      'x-eternal-ticket': ticket,
+      'x-eternal-execute': '1',
+      'cf-connecting-ip': ip,
+    },
+  });
+  return api.handleProtectedLoader(stage2, env);
+}
+
+async function secureFfaResponse(env, { deviceId='ffa-device', scriptId='s', loaderId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ip=TEST_IP } = {}) {
+  const stage1 = new Request(`https://auth.test/files/v4/ffa/${loaderId}.lua`, {
+    headers: {
+      'x-eternal-device': deviceId,
+      'x-eternal-execute': '1',
+      'cf-connecting-ip': ip,
+    },
+  });
+  const bootstrapResponse = await api.handleFfaPublicLoader(stage1, env, loaderId);
+  if (bootstrapResponse.status !== 200) return bootstrapResponse;
+  const bootstrap = await bootstrapResponse.text();
+  const ticket = ticketFromBootstrap(bootstrap);
+  assert.ok(ticket, 'FFA bootstrap should contain a signed loader ticket');
+  const stage2 = new Request(`https://auth.test/api/v1/ffa-loader?script_id=${encodeURIComponent(scriptId)}`, {
+    method: 'POST',
+    headers: {
+      'x-eternal-device': deviceId,
+      'x-eternal-ticket': ticket,
+      'x-eternal-execute': '1',
+      'cf-connecting-ip': ip,
+    },
+  });
+  return api.handleFfaProtectedLoader(stage2, env);
+}
 test('missing key and missing HWID return no protected source', async () => {
   const { env } = await fixture();
   for (const params of [{}, {key:'valid-key'}, {key:'wrong',device_id:'a'}]) {
-    const response = await api.handleProtectedLoader(request(params), env);
+    const response = await api.handleProtectedLoader(directRequest(params), env);
     assert.ok(response.status >= 400);
     assert.doesNotMatch(await response.text(), /SECRET_PROTECTED_CONTENT/);
   }
 });
 test('authenticated exposure report bans bound device, rejects other devices and survives HWID reset', async () => {
   const { db, env } = await fixture();
-  let response = await api.handleProtectedLoader(request({key:'valid-key',device_id:'a',script_id:'s'}), env);
+  let response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
   response = await api.handleSecurityReport(report({key:'valid-key',device_id:'someone-else',reason:'gui'}), env);
@@ -44,22 +104,22 @@ test('authenticated exposure report bans bound device, rejects other devices and
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n, 0);
   response = await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason:'gui'}), env);
   assert.equal(response.status, 200);
-  response = await api.handleProtectedLoader(request({key:'valid-key',device_id:'a'}), env);
+  response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 403);
   assert.match(await response.text(), /Blacklisted/);
   const result = await api.resetOwnHwid(env, {guild_id:'123456789012345678'}, 'u', {waitUntil(){}});
   assert.match(await result.text(), /Blacklisted/);
   db.prepare("UPDATE licenses SET hwid_hash = NULL WHERE id = 'l'").run();
-  response = await api.handleProtectedLoader(request({key:'valid-key',device_id:'b'}), env);
+  response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'b',scriptId:'s'});
   assert.equal(response.status, 403);
   const secondHash = await api.sha256Hex('second-key');
   db.prepare("INSERT INTO licenses (id,guild_id,key_hash,created_at,updated_at) VALUES ('l2','123456789012345678',?,0,0)").run(secondHash);
-  response = await api.handleProtectedLoader(request({key:'second-key',device_id:'a'}), env);
+  response = await secureProtectedResponse(env,{key:'second-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 403);
 });
 test('concurrent first binds only release code to the winning device', async () => {
   const { env } = await fixture();
-  const responses = await Promise.all(['a','b'].map(device_id => api.handleProtectedLoader(request({key:'valid-key',device_id,script_id:'s'}), env)));
+  const responses = await Promise.all(['a','b'].map(deviceId => secureProtectedResponse(env,{key:'valid-key',deviceId,scriptId:'s'})));
   assert.deepEqual(responses.map(r=>r.status).sort(), [200,403]);
 });
 test('reset default is five minutes and bootstrap is syntactically generated', () => {
@@ -106,11 +166,11 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.match(bootstrap,/http logger/);
   assert.match(bootstrap,/hookmetamethod/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);
-  response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
+  response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,200);
   assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
   db.prepare("UPDATE scripts SET ffa_enabled=0 WHERE id='s'").run();
-  response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
+  response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,403);
   assert.equal(await response.text(),'Blacklisted');
 });
@@ -131,12 +191,12 @@ test('legacy loader_probe false-positive HWID bans self-recover but real securit
   const hash=await api.hashDevice(env,'legacy-device');
   db.prepare("UPDATE licenses SET hwid_hash=?,status='security_blacklisted' WHERE id='l'").run(hash);
   db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'loader_probe','l',0)").run(hash);
-  let response=await api.handleProtectedLoader(request({key:'valid-key',device_id:'legacy-device',script_id:'s'}),env);
+  let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
   assert.equal(response.status,200);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
   db.prepare("UPDATE licenses SET status='security_blacklisted' WHERE id='l'").run();
   db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'clipboard','l',0)").run(hash);
-  response=await api.handleProtectedLoader(request({key:'valid-key',device_id:'legacy-device',script_id:'s'}),env);
+  response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
   assert.equal(response.status,403);
 });
 
@@ -185,9 +245,34 @@ test('FFA signed reports blacklist only the reporting device', async () => {
   assert.equal(response.status,200);
   assert.equal((await response.json()).status,'Blacklisted');
   assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'environment');
-  response=await api.handleFfaProtectedLoader(new Request('https://auth.test/api/v1/ffa-loader?script_id=s&device_id=ffa-device'),env);
+  response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,403);
   assert.equal(await response.text(),'Blacklisted');
+});
+
+test('protected source requires signed ticket and ticket is bound to client IP', async () => {
+  const {env}=await fixture();
+  let response=await api.handleProtectedLoader(directRequest({key:'valid-key',device_id:'a',script_id:'s'}),env);
+  assert.equal(response.status,403);
+
+  const stage1=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{
+    headers:{authorization:'Bearer valid-key','x-eternal-device':'a','x-eternal-execute':'1','cf-connecting-ip':TEST_IP}
+  });
+  const bootstrapResponse=await api.handlePublicLoader(stage1,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(bootstrapResponse.status,200);
+  const ticket=ticketFromBootstrap(await bootstrapResponse.text());
+  assert.ok(ticket);
+  response=await api.handleProtectedLoader(new Request('https://auth.test/api/v1/loader?script_id=s',{
+    method:'POST',
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'a',
+      'x-eternal-ticket':ticket,
+      'x-eternal-execute':'1',
+      'cf-connecting-ip':'198.51.100.77'
+    }
+  }),env);
+  assert.equal(response.status,403);
 });
 
 test('user reset reports remaining seconds within five-minute cooldown', async () => {

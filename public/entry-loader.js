@@ -14,6 +14,7 @@ local function __ea_client_envs()
 end
 
 local function __ea_disable_clipboard()
+__ea_guard_logger_files()
     local names={
         "setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
         "setrbxclipboard","copyclipboard","clipboardset","setclip",
@@ -45,6 +46,52 @@ local function __ea_disable_clipboard()
             if type(t)=="table" then
                 for _,name in ipairs(childNames) do replace(t,name) end
             end
+        end
+    end
+end
+
+local __ea_blocked_logger_files={
+    ["testestzen.txt"]=true,
+    ["sabcom_hub.lua"]=true
+}
+local function __ea_blocked_path(path)
+    local p=string.lower(tostring(path or "")):gsub("\\","/")
+    local base=p:match("([^/]+)$") or p
+    return __ea_blocked_logger_files[base]==true
+end
+local __ea_known_logger_file=false
+local function __ea_guard_logger_files()
+    for _,env in ipairs(__ea_client_envs()) do
+        pcall(function()
+            local rawIs=env.isfile
+            if type(rawIs)=="function" then
+                for name in pairs(__ea_blocked_logger_files) do
+                    local ok,exists=pcall(rawIs,name)
+                    if ok and exists then __ea_known_logger_file=true end
+                end
+            end
+        end)
+        for _,name in ipairs({"writefile","appendfile","readfile","isfile"}) do
+            pcall(function()
+                local old=env[name]
+                if type(old)~="function" then return end
+                if name=="isfile" then
+                    env[name]=function(path,...)
+                        if __ea_blocked_path(path) then return false end
+                        return old(path,...)
+                    end
+                elseif name=="readfile" then
+                    env[name]=function(path,...)
+                        if __ea_blocked_path(path) then return "" end
+                        return old(path,...)
+                    end
+                else
+                    env[name]=function(path,...)
+                        if __ea_blocked_path(path) then return nil end
+                        return old(path,...)
+                    end
+                end
+            end)
         end
     end
 end
@@ -82,7 +129,11 @@ if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
 ${clientHardeningLua()}
-if __ea_obviously_hooked(loadstring) or __ea_obviously_hooked(req) then stop() return end
+local __ea_hook_score=0
+if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
+if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
+if __ea_known_logger_file or __ea_hook_score>=3 then stop() return end
 e.script_key=k
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
@@ -108,7 +159,11 @@ if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
 ${clientHardeningLua()}
-if __ea_obviously_hooked(loadstring) or __ea_obviously_hooked(req) then stop() return end
+local __ea_hook_score=0
+if __ea_obviously_hooked(loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
+if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
+if __ea_known_logger_file or __ea_hook_score>=3 then stop() return end
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
 local f=loadstring(r.Body or r.body or "")

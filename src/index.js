@@ -3568,12 +3568,9 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
   const loaderUrl = loaderUrlForScript(guild, script);
   if (!loaderUrl) return discordMessage("Eternal Auth could not build this script's loader URL yet.");
 
-  const readyLoader = buildLoader(panel?.loader_template || guild.loader_template || defaultLoaderTemplate(), key, guild, script);
-  return discordMessage(`**${script.name}** • v${script.version}
-
-Here is your script:
-\`\`\`lua
-${readyLoader}
+  const cleanLoader = `script_key=${JSON.stringify(key)}\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
+  return discordMessage(`\`\`lua
+${cleanLoader}
 \`\`\``);
 }
 

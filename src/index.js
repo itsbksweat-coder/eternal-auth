@@ -1333,24 +1333,7 @@ function isBrowserNavigation(request) {
   const mode = (request.headers.get("sec-fetch-mode") || "").toLowerCase();
   const dest = (request.headers.get("sec-fetch-dest") || "").toLowerCase();
   const fetchUser = (request.headers.get("sec-fetch-user") || "").toLowerCase();
-  const ua = (request.headers.get("user-agent") || "").toLowerCase();
-
-  // Only classify actual document/browser navigations. Do not use Accept or
-  // Upgrade-Insecure-Requests here because Roblox/executor HTTP stacks may send
-  // browser-like values for those headers.
-  if (mode === "navigate" || dest === "document" || fetchUser === "?1") {
-    return true;
-  }
-
-  // Fallback for mobile/in-app browsers that omit Fetch Metadata.
-  // Explicitly exclude Roblox-style clients so game:HttpGet keeps working.
-  const looksRoblox = ua.includes("roblox") || ua.includes("wininet");
-  const looksBrowser =
-    ua.includes("mozilla/5.0") &&
-    (ua.includes("safari") || ua.includes("chrome") || ua.includes("crios") ||
-     ua.includes("firefox") || ua.includes("fxios") || ua.includes("edg") ||
-     ua.includes("opera") || ua.includes("opr/"));
-  return looksBrowser && !looksRoblox;
+  return mode === "navigate" || dest === "document" || fetchUser === "?1";
 }
 
 function hasLoaderExecutionIntent(request) {
@@ -1746,7 +1729,7 @@ local __ea_blocked_logger_files={
     ["sabcom_hub.lua"]=true
 }
 local function __ea_blocked_path(path)
-    local p=string.lower(tostring(path or "")):gsub("\\","/")
+    local p=string.lower(tostring(path or "")):gsub("\\\\","/")
     local base=p:match("([^/]+)$") or p
     return __ea_blocked_logger_files[base]==true
 end
@@ -3940,7 +3923,7 @@ function buildLoader(template, key, guild, script = null) {
   // Keep the user-facing result short. The public loader URL returns the
   // credential-handshake wrapper, so protected headers and HWID checks remain
   // server-enforced without displaying that wrapper in Discord.
-  return `script_key=${JSON.stringify(key)}\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
+  return `script_key=${JSON.stringify(key)}\nlocal __ea_src=game:HttpGet(${JSON.stringify(loaderUrl)}); if type(loadstring)~="function" then error("Eternal Auth: loadstring unavailable",0) end; local __ea_fn,__ea_err=loadstring(__ea_src); if type(__ea_fn)~="function" then error("Eternal Auth loader compile error: "..tostring(__ea_err),0) end; __ea_fn()`;
 }
 
 async function discordApi(env, path, options = {}) {

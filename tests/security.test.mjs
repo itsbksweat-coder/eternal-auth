@@ -172,7 +172,7 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   db.prepare("UPDATE scripts SET ffa_enabled=0 WHERE id='s'").run();
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,403);
-  assert.equal(await response.text(),'Blacklisted');
+  assert.equal(await response.text(),'Access denied');
 });
 
 test('legacy first-stage requests receive only a compatibility launcher, never protected source', async () => {
@@ -241,7 +241,7 @@ test('panel-scoped license cannot load a script attached to another panel', asyn
   assert.equal(response.status,200);
   response=await api.handlePublicLoader(new Request('https://auth.test/files/v4/loaders/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.lua',{headers:{authorization:'Bearer valid-key','x-eternal-device':'panel-device','x-eternal-execute':'1'}}),env,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',{waitUntil(){}});
   assert.equal(response.status,403);
-  assert.equal(await response.text(),'Blacklisted');
+  assert.equal(await response.text(),'Access denied');
 });
 
 test('Get Script output is two lines and each script receives its own loader URL', () => {

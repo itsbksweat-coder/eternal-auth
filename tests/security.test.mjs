@@ -180,6 +180,42 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(await response.text(),'Access denied');
 });
 
+test('authenticated loader repairs a missing project row from matching license and script', async () => {
+  const {db,env}=await fixture();
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.prepare("DELETE FROM guilds WHERE guild_id = ?").run('123456789012345678');
+
+  const request=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'repair-device',
+      'x-eternal-execute':'1',
+    }
+  });
+  const response=await api.handlePublicLoader(request,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(response.status,200);
+  const repaired=db.prepare("SELECT guild_id,active,base_url FROM guilds WHERE guild_id=?").get('123456789012345678');
+  assert.equal(repaired.guild_id,'123456789012345678');
+  assert.equal(Number(repaired.active),1);
+  assert.equal(repaired.base_url,'https://auth.test');
+});
+
+test('authenticated loader reports disabled project instead of project not found', async () => {
+  const {db,env}=await fixture();
+  db.prepare("UPDATE guilds SET active=0 WHERE guild_id=?").run('123456789012345678');
+
+  const request=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'disabled-project-device',
+      'x-eternal-execute':'1',
+    }
+  });
+  const response=await api.handlePublicLoader(request,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(response.status,403);
+  assert.equal(await response.text(),'Project disabled');
+});
+
 test('legacy first-stage requests receive only a compatibility launcher, never protected source', async () => {
   const {db,env}=await fixture();
   const probe=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{authorization:'Bearer valid-key','x-eternal-device':'probe-device'}});

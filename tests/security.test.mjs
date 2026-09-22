@@ -91,6 +91,28 @@ test('backend schema initializer has valid shared state and runs successfully', 
   await assert.doesNotReject(() => api.ensureBackendPersistenceSchema(env));
 });
 
+test('browser document navigation hides source pages while executor HTTP still receives loader source', async () => {
+  const {env}=await fixture();
+  const ctx={waitUntil(){}};
+
+  const browserRequest=new Request(
+    'https://auth.test/api/v1/bootstrap?loader_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    {headers:{'sec-fetch-mode':'navigate','sec-fetch-dest':'document','sec-fetch-user':'?1'}}
+  );
+  let response=await api.default.fetch(browserRequest,env,ctx);
+  assert.equal(response.status,200);
+  assert.equal(await response.text(),'');
+
+  const executorRequest=new Request(
+    'https://auth.test/api/v1/bootstrap?loader_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  );
+  response=await api.default.fetch(executorRequest,env,ctx);
+  assert.equal(response.status,200);
+  const lua=await response.text();
+  assert.match(lua,/X-Eternal-Device/);
+  assert.match(lua,/loadstring/);
+});
+
 test('missing key and missing HWID return no protected source', async () => {
   const { env } = await fixture();
   for (const params of [{}, {key:'valid-key'}, {key:'wrong',device_id:'a'}]) {
@@ -127,7 +149,7 @@ test('heuristic security reports never create persistent HWID bans', async () =>
   const {db,env}=await fixture();
   let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status,200);
-  for (const reason of ['integrity','environment','hwid_spoof']) {
+  for (const reason of ['integrity','environment','http_spy','hwid_spoof']) {
     response=await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}),env);
     assert.equal(response.status,200,reason);
     const body=await response.json();
@@ -137,15 +159,15 @@ test('heuristic security reports never create persistent HWID bans', async () =>
   }
 });
 
-test('confirmed HTTP spy report persistently HWID-blacklists authenticated client', async () => {
+test('clipboard source leak persistently HWID-blacklists authenticated client', async () => {
   const {db,env}=await fixture();
-  let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'spy-device',scriptId:'s'});
+  let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'clipboard-device',scriptId:'s'});
   assert.equal(response.status,200);
 
   response=await api.handleSecurityReport(report({
     key:'valid-key',
-    device_id:'spy-device',
-    reason:'http_spy'
+    device_id:'clipboard-device',
+    reason:'clipboard_source'
   }),env);
   assert.equal(response.status,200);
   const body=await response.json();
@@ -155,10 +177,10 @@ test('confirmed HTTP spy report persistently HWID-blacklists authenticated clien
   const row=db.prepare(
     "SELECT reason FROM hwid_blacklists WHERE guild_id='123456789012345678' LIMIT 1"
   ).get();
-  assert.equal(row.reason,'http_spy_confirmed');
+  assert.equal(row.reason,'clipboard_source_confirmed');
   assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'security_blacklisted');
 
-  response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'spy-device',scriptId:'s'});
+  response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'clipboard-device',scriptId:'s'});
   assert.equal(response.status,403);
   assert.equal(await response.text(),'Blacklisted');
 });
@@ -168,24 +190,25 @@ test('concurrent first binds only release code to the winning device', async () 
   const responses = await Promise.all(['a','b'].map(deviceId => secureProtectedResponse(env,{key:'valid-key',deviceId,scriptId:'s'})));
   assert.deepEqual(responses.map(r=>r.status).sort(), [200,403]);
 });
-test('reset default is five minutes and bootstrap has temporary broad URL spy guard', () => {
+test('reset default is five minutes and bootstrap only guards clipboard source leaks', () => {
   assert.equal(hwidCooldownSeconds({}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'5'}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'bad'}),300);
   const lua=api.buildBootstrapSource('https://auth.test','s');
   assert.match(lua,/https:\/\/auth\.test\/api\/v1\/loader\?script_id=s/);
   assert.match(lua,/https:\/\/auth\.test\/api\/v1\/security\/report/);
-  assert.match(lua,/reason="http_spy"/);
-  assert.match(lua,/\[%a\]\[%w\+%\.%\-\]\*:\/\//);
-  assert.match(lua,/www\./);
+  assert.match(lua,/reason="clipboard_source"/);
   assert.match(lua,/setclipboard/);
-  assert.match(lua,/writefile/);
-  assert.match(lua,/TextLabel/);
+  assert.match(lua,/toclipboard/);
+  assert.match(lua,/writeclipboard/);
+  assert.match(lua,/clipboard_source/);
+  assert.match(lua,/Blacklisted/);
+  assert.match(lua,/#candidate>=128/);
   assert.match(lua,/X-Eternal-Ticket/);
   assert.match(lua,/X-Eternal-Execute/);
   assert.match(lua,/loadstring\(body\)/);
   assert.match(lua,/body=nil/);
-  assert.doesNotMatch(lua,/hookfunction|hookmetamethod|decompile|getscriptbytecode/);
+  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|writefile|hookfunction|hookmetamethod/);
   assert.doesNotMatch(lua,/\$\{/);
 });
 
@@ -199,8 +222,9 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   const bootstrap=await response.text();
   assert.match(bootstrap,/api\/v1\/ffa-loader/);
   assert.match(bootstrap,/api\/v1\/ffa\/security\/report/);
-  assert.match(bootstrap,/reason="http_spy"/);
-  assert.match(bootstrap,/\[%a\]\[%w\+%\.%\-\]\*:\/\//);
+  assert.match(bootstrap,/reason="clipboard_source"/);
+  assert.match(bootstrap,/setclipboard/);
+  assert.doesNotMatch(bootstrap,/http_spy|__ea_has_url_scheme/);
   assert.match(bootstrap,/X-Eternal-Ticket/);
   assert.match(bootstrap,/X-Eternal-Execute/);
   assert.match(bootstrap,/loadstring\(body\)/);
@@ -392,14 +416,14 @@ test('FFA non-spy signed reports remain informational', async () => {
   assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
 });
 
-test('FFA confirmed HTTP spy report persistently blocks the device', async () => {
+test('FFA clipboard source leak persistently blocks the device', async () => {
   const {db,env}=await fixture();
-  const deviceHash=await api.hashDevice(env,'ffa-spy-device');
+  const deviceHash=await api.hashDevice(env,'ffa-clipboard-device');
   const token=await api.createFfaReportToken(env,'123456789012345678','s',deviceHash);
 
   const response=await api.handleFfaSecurityReport(new Request(
     'https://auth.test/api/v1/ffa/security/report',
-    {method:'POST',body:JSON.stringify({device_id:'ffa-spy-device',reason:'http_spy',token})}
+    {method:'POST',body:JSON.stringify({device_id:'ffa-clipboard-device',reason:'clipboard_source',token})}
   ),env);
   assert.equal(response.status,200);
   const body=await response.json();
@@ -409,7 +433,7 @@ test('FFA confirmed HTTP spy report persistently blocks the device', async () =>
   const row=db.prepare(
     "SELECT reason FROM hwid_blacklists WHERE guild_id='123456789012345678' LIMIT 1"
   ).get();
-  assert.equal(row.reason,'http_spy_confirmed');
+  assert.equal(row.reason,'clipboard_source_confirmed');
 });
 
 test('protected source requires a signed single-use ticket but tolerates IP and UA changes', async () => {

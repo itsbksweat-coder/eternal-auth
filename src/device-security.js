@@ -1,7 +1,24 @@
+const NON_PERSISTENT_SECURITY_REASONS = [
+  'loader_probe',
+  'integrity',
+  'environment',
+  'http_spy',
+  'hwid_spoof',
+];
+
 export async function deviceBlocked(env, guildId, ...hashes) {
   const unique = [...new Set(hashes.filter(Boolean))];
   if (!unique.length) return false;
-  const row = await env.DB.prepare(`SELECT 1 AS blocked FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash IN (${unique.map(() => '?').join(',')}) LIMIT 1`).bind(guildId, ...unique).first();
+  const placeholders = unique.map(() => '?').join(',');
+  const reasonPlaceholders = NON_PERSISTENT_SECURITY_REASONS.map(() => '?').join(',');
+  const row = await env.DB.prepare(
+    `SELECT 1 AS blocked
+       FROM hwid_blacklists
+      WHERE guild_id = ?
+        AND hwid_hash IN (${placeholders})
+        AND (reason IS NULL OR reason NOT IN (${reasonPlaceholders}))
+      LIMIT 1`
+  ).bind(guildId, ...unique, ...NON_PERSISTENT_SECURITY_REASONS).first();
   return !!row;
 }
 

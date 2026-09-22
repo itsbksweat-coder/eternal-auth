@@ -109,7 +109,7 @@ test('client security reports are informational and never create HWID bans', asy
   assert.equal(response.status, 403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n, 0);
 
-  for (const reason of ['gui','clipboard','file','console','network','integrity','environment','http_spy','hwid_spoof']) {
+  for (const reason of ['gui','clipboard','file','console','network','integrity','environment','hwid_spoof']) {
     response = await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}), env);
     assert.equal(response.status, 200, reason);
     const body = await response.json();
@@ -127,7 +127,7 @@ test('heuristic security reports never create persistent HWID bans', async () =>
   const {db,env}=await fixture();
   let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status,200);
-  for (const reason of ['integrity','environment','http_spy','hwid_spoof']) {
+  for (const reason of ['integrity','environment','hwid_spoof']) {
     response=await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}),env);
     assert.equal(response.status,200,reason);
     const body=await response.json();
@@ -137,23 +137,55 @@ test('heuristic security reports never create persistent HWID bans', async () =>
   }
 });
 
+test('confirmed HTTP spy report persistently HWID-blacklists authenticated client', async () => {
+  const {db,env}=await fixture();
+  let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'spy-device',scriptId:'s'});
+  assert.equal(response.status,200);
+
+  response=await api.handleSecurityReport(report({
+    key:'valid-key',
+    device_id:'spy-device',
+    reason:'http_spy'
+  }),env);
+  assert.equal(response.status,200);
+  const body=await response.json();
+  assert.equal(body.persistent,true);
+  assert.equal(body.status,'Blacklisted');
+
+  const row=db.prepare(
+    "SELECT reason FROM hwid_blacklists WHERE guild_id='123456789012345678' LIMIT 1"
+  ).get();
+  assert.equal(row.reason,'http_spy_confirmed');
+  assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'security_blacklisted');
+
+  response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'spy-device',scriptId:'s'});
+  assert.equal(response.status,403);
+  assert.equal(await response.text(),'Blacklisted');
+});
+
 test('concurrent first binds only release code to the winning device', async () => {
   const { env } = await fixture();
   const responses = await Promise.all(['a','b'].map(deviceId => secureProtectedResponse(env,{key:'valid-key',deviceId,scriptId:'s'})));
   assert.deepEqual(responses.map(r=>r.status).sort(), [200,403]);
 });
-test('reset default is five minutes and bootstrap is compatibility-only', () => {
+test('reset default is five minutes and bootstrap has temporary broad URL spy guard', () => {
   assert.equal(hwidCooldownSeconds({}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'5'}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'bad'}),300);
   const lua=api.buildBootstrapSource('https://auth.test','s');
   assert.match(lua,/https:\/\/auth\.test\/api\/v1\/loader\?script_id=s/);
+  assert.match(lua,/https:\/\/auth\.test\/api\/v1\/security\/report/);
+  assert.match(lua,/reason="http_spy"/);
+  assert.match(lua,/\[%a\]\[%w\+%\.%\-\]\*:\/\//);
+  assert.match(lua,/www\./);
+  assert.match(lua,/setclipboard/);
+  assert.match(lua,/writefile/);
+  assert.match(lua,/TextLabel/);
   assert.match(lua,/X-Eternal-Ticket/);
   assert.match(lua,/X-Eternal-Execute/);
   assert.match(lua,/loadstring\(body\)/);
   assert.match(lua,/body=nil/);
-  assert.doesNotMatch(lua,/api\/v1\/security\/report/);
-  assert.doesNotMatch(lua,/__ea_block|__ea_capture_source|hookfunction|hookmetamethod|TextBox|setclipboard|decompile|getscriptbytecode/);
+  assert.doesNotMatch(lua,/hookfunction|hookmetamethod|decompile|getscriptbytecode/);
   assert.doesNotMatch(lua,/\$\{/);
 });
 
@@ -336,7 +368,7 @@ test('Get Script output is two lines and each script receives its own loader URL
   assert.doesNotMatch(first,/X-Eternal-Execute|local e=/);
 });
 
-test('FFA signed reports are informational and never create HWID bans', async () => {
+test('FFA non-spy signed reports remain informational', async () => {
   const {db,env}=await fixture();
   const deviceHash=await api.hashDevice(env,'ffa-device');
   const token=await api.createFfaReportToken(env,'123456789012345678','s',deviceHash);
@@ -355,6 +387,26 @@ test('FFA signed reports are informational and never create HWID bans', async ()
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,200);
   assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
+});
+
+test('FFA confirmed HTTP spy report persistently blocks the device', async () => {
+  const {db,env}=await fixture();
+  const deviceHash=await api.hashDevice(env,'ffa-spy-device');
+  const token=await api.createFfaReportToken(env,'123456789012345678','s',deviceHash);
+
+  const response=await api.handleFfaSecurityReport(new Request(
+    'https://auth.test/api/v1/ffa/security/report',
+    {method:'POST',body:JSON.stringify({device_id:'ffa-spy-device',reason:'http_spy',token})}
+  ),env);
+  assert.equal(response.status,200);
+  const body=await response.json();
+  assert.equal(body.persistent,true);
+  assert.equal(body.status,'Blacklisted');
+
+  const row=db.prepare(
+    "SELECT reason FROM hwid_blacklists WHERE guild_id='123456789012345678' LIMIT 1"
+  ).get();
+  assert.equal(row.reason,'http_spy_confirmed');
 });
 
 test('protected source requires a signed single-use ticket but tolerates IP and UA changes', async () => {

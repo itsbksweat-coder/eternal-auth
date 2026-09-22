@@ -1531,6 +1531,33 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     }
   }
 
+  // A copied loader URL can outlive a loader-id migration. Once the key is
+  // authenticated, use the license's own panel/script mapping as the source of
+  // truth instead of rejecting a valid license because the URL id is stale.
+  if (!script && license.panel_id) {
+    const assignedPanel = await env.DB.prepare(
+      "SELECT * FROM panels WHERE id = ? AND guild_id = ? LIMIT 1"
+    ).bind(license.panel_id, license.guild_id).first();
+
+    if (assignedPanel && Number(assignedPanel.active || 0) === 1 && assignedPanel.script_id) {
+      const assignedScript = await env.DB.prepare(
+        "SELECT * FROM scripts WHERE id = ? AND guild_id = ? LIMIT 1"
+      ).bind(assignedPanel.script_id, license.guild_id).first();
+      if (assignedScript) script = await ensureScriptLoaderId(env, assignedScript);
+    }
+  }
+
+  // Older unscoped/stock keys may not have a panel. If there is only one
+  // enabled script in the licensed project, there is no ambiguity, so allow a
+  // stale loader URL to resolve to that one script.
+  if (!script && !license.panel_id) {
+    const enabledScripts = await env.DB.prepare(
+      "SELECT * FROM scripts WHERE guild_id = ? AND enabled = 1 ORDER BY created_at ASC LIMIT 2"
+    ).bind(license.guild_id).all();
+    const rows = enabledScripts.results || [];
+    if (rows.length === 1) script = await ensureScriptLoaderId(env, rows[0]);
+  }
+
   let guild = null;
   if (script) {
     // Do not use getGuild() here because it intentionally filters active=1,
@@ -1577,7 +1604,7 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     }
   }
 
-  if (!script) return deniedSource("Script not found");
+  if (!script) return deniedSource("Script not found. Copy a fresh loader URL.");
   if (!guild) return deniedSource("Project record missing");
   if (!Number(guild.active)) return deniedSource("Project disabled");
   if (!script.enabled) return deniedSource("Script disabled");

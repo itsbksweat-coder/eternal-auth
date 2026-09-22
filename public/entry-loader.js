@@ -206,19 +206,27 @@ local function stop(msg)
 end
 if not k or tostring(k)=="" or tostring(k)=="KEY" then stop("Missing script key") return end
 local h=game:GetService("HttpService")
+local legacyDevice
+pcall(function()
+    if type(gethwid)=="function" then
+        local value=gethwid()
+        if value and tostring(value)~="" then legacyDevice=tostring(value) end
+    end
+end)
+
+-- Prefer Eternal Auth's own persisted device id. Some mobile executors expose
+-- a gethwid() value that changes between launches.
 local d
-pcall(function() if type(gethwid)=="function" then d=gethwid() end end)
-if not d or tostring(d)=="" then
-    if readfile and writefile then
-        local ok,v=pcall(readfile,"eternal_auth_device.txt")
-        if ok and v and v~="" then
-            d=v
-        else
-            d=h:GenerateGUID(false)
-            pcall(writefile,"eternal_auth_device.txt",d)
-        end
+if readfile and writefile then
+    local ok,v=pcall(readfile,"eternal_auth_device.txt")
+    if ok and v and tostring(v)~="" then
+        d=tostring(v)
+    else
+        d=h:GenerateGUID(false)
+        pcall(writefile,"eternal_auth_device.txt",d)
     end
 end
+if not d or tostring(d)=="" then d=legacyDevice end
 if not d or tostring(d)=="" then stop("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if type(req)~="function" then stop("HTTP request unavailable") return end
@@ -229,6 +237,7 @@ local ok,r=pcall(req,{
     Headers={
         Authorization="Bearer "..tostring(k),
         ["X-Eternal-Device"]=tostring(d),
+        ["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",
         ["X-Eternal-Execute"]="1"
     }
 })
@@ -236,7 +245,13 @@ if not ok or not r then stop("Eternal Auth connection failed") return end
 local code=tonumber(r.StatusCode or r.status_code or 0)
 local body=r.Body or r.body or ""
 if code~=200 then
-    stop(string.find(body,"Blacklisted",1,true) and "Blacklisted" or ("Eternal Auth denied access ("..tostring(code)..")"))
+    if string.find(tostring(body),"Blacklisted",1,true) then
+        stop("Blacklisted")
+    else
+        local reason=tostring(body or "")
+        if reason=="" then reason="HTTP "..tostring(code) end
+        stop("Eternal Auth: "..reason)
+    end
     return
 end
 if type(loadstring)~="function" then stop("loadstring unavailable") return end
@@ -255,17 +270,19 @@ local function stop(msg)
     end)
 end
 local d
-pcall(function() if type(gethwid)=="function" then d=gethwid() end end)
-if not d or tostring(d)=="" then
-    if readfile and writefile then
-        local ok,v=pcall(readfile,"eternal_auth_device.txt")
-        if ok and v and v~="" then
-            d=v
-        else
-            d=h:GenerateGUID(false)
-            pcall(writefile,"eternal_auth_device.txt",d)
-        end
+if readfile and writefile then
+    local ok,v=pcall(readfile,"eternal_auth_device.txt")
+    if ok and v and tostring(v)~="" then
+        d=tostring(v)
+    else
+        d=h:GenerateGUID(false)
+        pcall(writefile,"eternal_auth_device.txt",d)
     end
+end
+if not d or tostring(d)=="" then
+    pcall(function()
+        if type(gethwid)=="function" then d=gethwid() end
+    end)
 end
 if not d or tostring(d)=="" then stop("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)

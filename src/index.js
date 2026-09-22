@@ -2724,25 +2724,62 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       if (action !== "setpanel_project") {
         ctx.waitUntil((async () => {
           try {
-            const response = await handleDiscordInteraction(request, env, ctx, interaction, true);
+            try {
+              await ensureBackendPersistenceSchema(env);
+            } catch (schemaError) {
+              // Existing panel actions should still work if a background
+              // self-migration check has a transient/race failure.
+              console.error("Discord component schema ensure failed", schemaError);
+            }
+            const response = await handleDiscordComponent(interaction, env, ctx);
             await updateDeferredDiscordResponse(interaction, response);
           } catch (error) {
             console.error("Deferred Discord component failed", error);
-            await updateDeferredDiscordResponse(interaction, discordMessage("Eternal Auth could not complete that action."));
+            const message = String(error?.message || error || "unknown error").slice(0, 180);
+            await updateDeferredDiscordResponse(
+              interaction,
+              discordMessage(`Eternal Auth action failed: ${message}`),
+            );
           }
         })());
         return deferredDiscordMessage();
       }
     }
 
-    if (interaction.type === 2 || interaction.type === 5) {
+    if (interaction.type === 5) {
+      ctx.waitUntil((async () => {
+        try {
+          try {
+            await ensureBackendPersistenceSchema(env);
+          } catch (schemaError) {
+            console.error("Discord modal schema ensure failed", schemaError);
+          }
+          const response = await handleDiscordModalSubmit(interaction, env, ctx);
+          await updateDeferredDiscordResponse(interaction, response);
+        } catch (error) {
+          console.error("Deferred Discord modal failed", error);
+          const message = String(error?.message || error || "unknown error").slice(0, 180);
+          await updateDeferredDiscordResponse(
+            interaction,
+            discordMessage(`Eternal Auth action failed: ${message}`),
+          );
+        }
+      })());
+      return deferredDiscordMessage();
+    }
+
+    if (interaction.type === 2) {
       ctx.waitUntil((async () => {
         try {
           const response = await handleDiscordInteraction(request, env, ctx, interaction, true);
           await updateDeferredDiscordResponse(interaction, response);
         } catch (error) {
-          console.error("Deferred Discord interaction failed", error);
-          await updateDeferredDiscordResponse(interaction, discordMessage("Eternal Auth could not complete that command."));
+          console.error("Deferred Discord command failed", error);
+          const message = String(error?.message || error || "unknown error").slice(0, 180);
+          await updateDeferredDiscordResponse(
+            interaction,
+            discordMessage(`Eternal Auth command failed: ${message}`),
+          );
         }
       })());
       return deferredDiscordMessage();

@@ -1333,16 +1333,24 @@ function isBrowserNavigation(request) {
   const mode = (request.headers.get("sec-fetch-mode") || "").toLowerCase();
   const dest = (request.headers.get("sec-fetch-dest") || "").toLowerCase();
   const fetchUser = (request.headers.get("sec-fetch-user") || "").toLowerCase();
-  const accept = (request.headers.get("accept") || "").toLowerCase();
-  const upgrade = (request.headers.get("upgrade-insecure-requests") || "").trim();
-  return (
-    mode === "navigate" ||
-    dest === "document" ||
-    fetchUser === "?1" ||
-    accept.includes("text/html") ||
-    accept.includes("application/xhtml+xml") ||
-    upgrade === "1"
-  );
+  const ua = (request.headers.get("user-agent") || "").toLowerCase();
+
+  // Only classify actual document/browser navigations. Do not use Accept or
+  // Upgrade-Insecure-Requests here because Roblox/executor HTTP stacks may send
+  // browser-like values for those headers.
+  if (mode === "navigate" || dest === "document" || fetchUser === "?1") {
+    return true;
+  }
+
+  // Fallback for mobile/in-app browsers that omit Fetch Metadata.
+  // Explicitly exclude Roblox-style clients so game:HttpGet keeps working.
+  const looksRoblox = ua.includes("roblox") || ua.includes("wininet");
+  const looksBrowser =
+    ua.includes("mozilla/5.0") &&
+    (ua.includes("safari") || ua.includes("chrome") || ua.includes("crios") ||
+     ua.includes("firefox") || ua.includes("fxios") || ua.includes("edg") ||
+     ua.includes("opera") || ua.includes("opr/"));
+  return looksBrowser && !looksRoblox;
 }
 
 function hasLoaderExecutionIntent(request) {

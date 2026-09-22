@@ -151,8 +151,8 @@ test('reset default is five minutes and bootstrap is syntactically generated', (
   assert.match(clipboardLayer,/return env\[name\]/);
   assert.match(clipboardLayer,/"clipboard","Clipboard","syn"/);
   assert.match(lua,/getfenv\(0\)/);
-  assert.ok(lua.includes(String.raw`gsub("\\\\","/")`), 'generated bootstrap must contain a valid Lua backslash literal');
-  assert.ok(!lua.includes(String.raw`gsub("\\","/")`), 'generated bootstrap must not contain the invalid one-backslash Lua literal');
+  assert.ok(lua.includes(String.raw`gsub("\\","/")`), 'generated bootstrap must contain a valid Lua backslash literal');
+  assert.ok(!lua.includes(String.raw`gsub("\","/")`), 'generated bootstrap must not contain the invalid one-backslash Lua literal');
 });
 
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {
@@ -186,8 +186,8 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(response.status,200);
   const source=await response.text();
   assert.match(source,/X-Eternal-Execute/);
-  assert.ok(source.includes(String.raw`gsub("\\\\","/")`), 'first-stage launcher must contain a valid Lua backslash literal');
-  assert.ok(!source.includes(String.raw`gsub("\\","/")`), 'first-stage launcher must not contain the invalid one-backslash Lua literal');
+  assert.ok(source.includes(String.raw`gsub("\\","/")`), 'first-stage launcher must contain a valid Lua backslash literal');
+  assert.ok(!source.includes(String.raw`gsub("\","/")`), 'first-stage launcher must not contain the invalid one-backslash Lua literal');
   assert.doesNotMatch(source,/SECRET_PROTECTED_CONTENT/);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 });

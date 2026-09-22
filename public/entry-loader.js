@@ -54,7 +54,7 @@ local __ea_blocked_logger_files={
     ["sabcom_hub.lua"]=true
 }
 local function __ea_blocked_path(path)
-    local p=string.lower(tostring(path or "")):gsub("\\","/")
+    local p=string.lower(tostring(path or "")):gsub("\\\\","/")
     local base=p:match("([^/]+)$") or p
     return __ea_blocked_logger_files[base]==true
 end

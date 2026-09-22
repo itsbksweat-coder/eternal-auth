@@ -3250,14 +3250,23 @@ async function handleDiscordComponent(interaction, env, ctx) {
   if (action === "redeem") {
     return discordModal(`eternal:redeem_modal${panelId ? `:${panelId}` : ""}`, "Redeem Eternal Auth Key", "Redeem code", "ETERNAL-...");
   }
-  if (action === "copy_script") {
+  if (action === "copy_script" || action === "mobile_copy_script") {
     const selectedScriptId = cleanText(parts[3], 128);
     const copyPanel = panelId && panelId !== "guild" ? await getPanel(env, guildId, panelId) : null;
     if (panelId && panelId !== "guild" && !copyPanel) {
       return discordMessage("This Eternal Auth panel has been disabled or removed.");
     }
     const copyGuild = guildForPanel(guild, copyPanel);
-    return sendOwnScript(env, copyGuild, userId, interaction, selectedScriptId, copyPanel, false);
+    return sendOwnScript(
+      env,
+      copyGuild,
+      userId,
+      interaction,
+      selectedScriptId,
+      copyPanel,
+      false,
+      action === "mobile_copy_script",
+    );
   }
   if (action === "get_script") return sendOwnScript(env, panelGuild, userId, interaction, null, panel);
   if (action === "script_select") {
@@ -3521,7 +3530,7 @@ function pinnedLoaderIdFromTemplate(template) {
   }
 }
 
-async function sendOwnScript(env, guild, userId, interaction, selectedScriptId = null, panel = null, includeCopyButton = true) {
+async function sendOwnScript(env, guild, userId, interaction, selectedScriptId = null, panel = null, includeCopyButton = true, mobileFormat = false) {
   const license = await findAnyLicenseForDiscord(env, guild.guild_id, userId);
   const valid = await validateLicense(env, license, null, false);
   if (!valid.ok) return discordMessage(valid.error);
@@ -3580,18 +3589,31 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
   const cleanLoader = `script_key=${JSON.stringify(key)}\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
   const components = includeCopyButton ? [{
     type: 1,
-    components: [{
-      type: 2,
-      style: 2,
-      label: "Copy Script",
-      custom_id: `eternal:copy_script:${panel?.id || "guild"}:${script.id}`,
-      emoji: { name: "📋" },
-    }],
+    components: [
+      {
+        type: 2,
+        style: 2,
+        label: "Copy Script",
+        custom_id: `eternal:copy_script:${panel?.id || "guild"}:${script.id}`,
+        emoji: { name: "📋" },
+      },
+      {
+        type: 2,
+        style: 2,
+        label: "Mobile Copy",
+        custom_id: `eternal:mobile_copy_script:${panel?.id || "guild"}:${script.id}`,
+        emoji: { name: "📱" },
+      },
+    ],
   }] : undefined;
 
-  return discordMessage(`\`\`\`lua
+  const content = mobileFormat
+    ? cleanLoader.split("\n").map((line) => `\`${line}\``).join("\n")
+    : `\`\`\`lua
 ${cleanLoader}
-\`\`\``, true, components);
+\`\`\``;
+
+  return discordMessage(content, true, components);
 }
 
 async function sendFfaScript(env, guild, requestedName = null) {

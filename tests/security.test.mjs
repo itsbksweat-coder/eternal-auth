@@ -94,29 +94,30 @@ test('missing key and missing HWID return no protected source', async () => {
     assert.doesNotMatch(await response.text(), /SECRET_PROTECTED_CONTENT/);
   }
 });
-test('authenticated exposure report bans bound device, rejects other devices and survives HWID reset', async () => {
+test('client security reports are informational and never create HWID bans', async () => {
   const { db, env } = await fixture();
   let response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
+
   response = await api.handleSecurityReport(report({key:'valid-key',device_id:'someone-else',reason:'gui'}), env);
   assert.equal(response.status, 403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n, 0);
-  response = await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason:'gui'}), env);
-  assert.equal(response.status, 200);
+
+  for (const reason of ['gui','clipboard','file','console','network','integrity','environment','http_spy','hwid_spoof']) {
+    response = await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}), env);
+    assert.equal(response.status, 200, reason);
+    const body = await response.json();
+    assert.equal(body.persistent, false, reason);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n, 0, reason);
+    assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status, 'active', reason);
+  }
+
   response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
-  assert.equal(response.status, 403);
-  assert.match(await response.text(), /Blacklisted/);
-  const result = await api.resetOwnHwid(env, {guild_id:'123456789012345678'}, 'u', {waitUntil(){}});
-  assert.match(await result.text(), /Blacklisted/);
-  db.prepare("UPDATE licenses SET hwid_hash = NULL WHERE id = 'l'").run();
-  response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'b',scriptId:'s'});
-  assert.equal(response.status, 403);
-  const secondHash = await api.sha256Hex('second-key');
-  db.prepare("INSERT INTO licenses (id,guild_id,key_hash,created_at,updated_at) VALUES ('l2','123456789012345678',?,0,0)").run(secondHash);
-  response = await secureProtectedResponse(env,{key:'second-key',deviceId:'a',scriptId:'s'});
-  assert.equal(response.status, 403);
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
 });
+
 test('heuristic security reports never create persistent HWID bans', async () => {
   const {db,env}=await fixture();
   let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
@@ -136,37 +137,19 @@ test('concurrent first binds only release code to the winning device', async () 
   const responses = await Promise.all(['a','b'].map(deviceId => secureProtectedResponse(env,{key:'valid-key',deviceId,scriptId:'s'})));
   assert.deepEqual(responses.map(r=>r.status).sort(), [200,403]);
 });
-test('reset default is five minutes and bootstrap is syntactically generated', () => {
+test('reset default is five minutes and bootstrap is compatibility-only', () => {
   assert.equal(hwidCooldownSeconds({}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'5'}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'bad'}),300);
   const lua=api.buildBootstrapSource('https://auth.test','s');
-  assert.match(lua,/https:\/\/auth.test\/api\/v1\/security\/report/);
-  assert.match(lua,/__ea_capture_source\(s\)/);
-  assert.match(lua,/s=nil/);
-  assert.doesNotMatch(lua,/__ea_protected_source=s/);
+  assert.match(lua,/https:\/\/auth\.test\/api\/v1\/loader\?script_id=s/);
+  assert.match(lua,/X-Eternal-Ticket/);
+  assert.match(lua,/X-Eternal-Execute/);
+  assert.match(lua,/loadstring\(body\)/);
+  assert.match(lua,/body=nil/);
+  assert.doesNotMatch(lua,/api\/v1\/security\/report/);
+  assert.doesNotMatch(lua,/__ea_block|__ea_capture_source|hookfunction|hookmetamethod|TextBox|setclipboard|decompile|getscriptbytecode/);
   assert.doesNotMatch(lua,/\$\{/);
-  const extractionLayer=lua.slice(lua.indexOf('-- Layer 8:'),lua.indexOf('-- Layer 9:'));
-  assert.match(extractionLayer,/decompile|getscriptbytecode/);
-  assert.doesNotMatch(extractionLayer,/"getgenv"|"getfenv"|"gethui"|"hookfunction"|"hookmetamethod"/);
-  const guiLayer=lua.slice(lua.indexOf('-- Layer 5:'),lua.indexOf('-- Layer 6:'));
-  assert.match(guiLayer,/TextBox/);
-  assert.match(guiLayer,/TextLabel/);
-  assert.match(guiLayer,/TextButton/);
-  assert.match(guiLayer,/GetPropertyChangedSignal\("Text"\)/);
-  assert.match(guiLayer,/__ea_gui_fragments/);
-  assert.match(guiLayer,/__ea_scrub_gui=function\(\)/);
-  assert.match(guiLayer,/obj\.Text="Blacklisted"/);
-  assert.match(lua,/if type\(__ea_scrub_gui\)=="function" then pcall\(__ea_scrub_gui\) end/);
-  const clipboardLayer=lua.slice(lua.indexOf('-- Layer 3:'),lua.indexOf('-- Layer 4:'));
-  assert.match(clipboardLayer,/copyclipboard/);
-  assert.match(clipboardLayer,/clipboardset/);
-  assert.match(clipboardLayer,/setclip/);
-  assert.match(clipboardLayer,/return env\[name\]/);
-  assert.match(clipboardLayer,/"clipboard","Clipboard","syn"/);
-  assert.match(lua,/getfenv\(0\)/);
-  assert.ok(lua.includes(String.raw`gsub("\\","/")`), 'generated bootstrap must contain a valid Lua backslash literal');
-  assert.ok(!lua.includes(String.raw`gsub("\","/")`), 'generated bootstrap must not contain the invalid one-backslash Lua literal');
 });
 
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {
@@ -206,21 +189,19 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 });
 
-test('heuristic HWID bans self-recover but real source-leak bans do not', async () => {
+test('old automatic HWID bans self-recover on a valid request', async () => {
   const {db,env}=await fixture();
   const hash=await api.hashDevice(env,'legacy-device');
-  for (const reason of ['loader_probe','integrity','environment','http_spy','hwid_spoof']) {
+  for (const reason of ['loader_probe','integrity','environment','http_spy','hwid_spoof','gui','clipboard','file','console','network']) {
     db.prepare("DELETE FROM hwid_blacklists").run();
     db.prepare("UPDATE licenses SET hwid_hash=?,status='security_blacklisted' WHERE id='l'").run(hash);
     db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,?, 'l',0)").run(hash,reason);
     const response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
-    assert.equal(response.status,200, reason);
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0, reason);
+    assert.equal(response.status,200,reason);
+    assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT',reason);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0,reason);
+    assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'active',reason);
   }
-  db.prepare("UPDATE licenses SET status='security_blacklisted' WHERE id='l'").run();
-  db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'clipboard','l',0)").run(hash);
-  const response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
-  assert.equal(response.status,403);
 });
 
 test('admin can remove an FFA HWID blacklist by pasting the raw device ID', async () => {
@@ -278,20 +259,25 @@ test('Get Script output is two lines and each script receives its own loader URL
   assert.doesNotMatch(first,/X-Eternal-Execute|local e=/);
 });
 
-test('FFA signed reports blacklist only the reporting device', async () => {
+test('FFA signed reports are informational and never create HWID bans', async () => {
   const {db,env}=await fixture();
   const deviceHash=await api.hashDevice(env,'ffa-device');
   const token=await api.createFfaReportToken(env,'123456789012345678','s',deviceHash);
+
   let response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'other-device',reason:'gui',token})}),env);
   assert.equal(response.status,403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
+
   response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'ffa-device',reason:'gui',token})}),env);
   assert.equal(response.status,200);
-  assert.equal((await response.json()).status,'Blacklisted');
-  assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'gui');
+  const body=await response.json();
+  assert.equal(body.persistent,false);
+  assert.equal(body.status,'Observed');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
+
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
-  assert.equal(response.status,403);
-  assert.equal(await response.text(),'Blacklisted');
+  assert.equal(response.status,200);
+  assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
 });
 
 test('protected source requires signed ticket and ticket is bound to client IP', async () => {

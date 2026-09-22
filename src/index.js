@@ -456,9 +456,8 @@ export default {
     try {
       const url = new URL(request.url);
 
-      // Loader/source endpoints are execution-only. A normal browser navigation
-      // gets an empty 404 instead of a page or source response, while executor
-      // HTTP requests continue through the normal loader handshake.
+      // Only hide verification/source endpoints from normal browser visits.
+      // The website and every other route keep their original behavior.
       if (
         isBrowserNavigation(request) &&
         (
@@ -467,13 +466,12 @@ export default {
           url.pathname.startsWith("/files/v4/ffa/")
         )
       ) {
-        return new Response(null, {
-          status: 204,
+        return new Response("", {
+          status: 200,
           headers: {
             "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store",
             "x-content-type-options": "nosniff",
-            "x-frame-options": "DENY",
           },
         });
       }
@@ -558,8 +556,6 @@ export default {
         }
       }
 
-      // Serve the normal Eternal Auth website/admin UI for ordinary browser
-      // routes. Loader/source routes are blocked from browser navigation above.
       const assetResponse = await env.ASSETS.fetch(request);
       return withSecurityHeaders(assetResponse);
     } catch (error) {
@@ -1339,13 +1335,14 @@ function isBrowserNavigation(request) {
   const fetchUser = (request.headers.get("sec-fetch-user") || "").toLowerCase();
   const accept = (request.headers.get("accept") || "").toLowerCase();
   const upgrade = (request.headers.get("upgrade-insecure-requests") || "").trim();
-
-  // Block normal browser/document visits from receiving a .lua response. Some
-  // mobile/in-app browsers omit Fetch Metadata headers, so also recognize the
-  // normal HTML navigation Accept header. Executor requests typically use
-  // */* or application/text-like accepts and continue through the loader path.
-  const wantsHtml = accept.includes("text/html") || accept.includes("application/xhtml+xml");
-  return mode === "navigate" || dest === "document" || fetchUser === "?1" || wantsHtml || upgrade === "1";
+  return (
+    mode === "navigate" ||
+    dest === "document" ||
+    fetchUser === "?1" ||
+    accept.includes("text/html") ||
+    accept.includes("application/xhtml+xml") ||
+    upgrade === "1"
+  );
 }
 
 function hasLoaderExecutionIntent(request) {
@@ -1560,82 +1557,566 @@ function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = ""
     ? `local key="FFA"`
     : `local key=e.script_key or script_key
 if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to access this script. No key found.") return end`;
+  const reportAttempt = ffa ? `    if __ea_request then
+        pcall(__ea_request,{
+            Url=__ea_report_url,Method="POST",
+            Headers={["Content-Type"]="application/json"},
+            Body=H:JSONEncode({device_id=tostring(d),reason=reason,token=${JSON.stringify(ffaReportToken)}})
+        })
+    end` : `    if __ea_request then
+        pcall(__ea_request,{
+            Url=__ea_report_url,Method="POST",
+            Headers={["Content-Type"]="application/json"},
+            Body=H:JSONEncode({key=tostring(key),device_id=tostring(d),reason=reason})
+        })
+    end`;
+  const protectedUrl = `local u="${apiUrl}"`;
   const protectedHeaders = ffa
-    ? `local headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`
-    : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`;
-
-  return `-- Eternal Auth compatibility bootstrap
+    ? `local __ea_source_headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`
+    : `local __ea_source_headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`;
+  return `-- Eternal Auth fast bootstrap + nine-layer source leak guard
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
 local lp=P.LocalPlayer
-local function K(m)
-    if lp then pcall(function() lp:Kick(tostring(m or "Authentication failed.")) end) end
-end
+local function K(m) if lp then pcall(function() lp:Kick(tostring(m or "Authentication failed.")) end) end end
 
 local e=(getgenv and getgenv()) or _G
 ${keySetup}
 
+-- Prefer the executor's device identifier; fallback is a local installation id.
 local d
-pcall(function()
-    if type(gethwid)=="function" then d=gethwid() end
-end)
+pcall(function() if type(gethwid)=="function" then d=gethwid() end end)
 if not d or tostring(d)=="" then
     if readfile and writefile then
-        local file="eternal_auth_device.txt"
-        local ok,value=pcall(readfile,file)
-        if ok and value and value~="" then
-            d=value
-        else
-            d=H:GenerateGUID(false)
-            pcall(writefile,file,d)
-        end
+        local f="eternal_auth_device.txt"
+        local ok,v=pcall(readfile,f)
+        if ok and v and v~="" then d=v else d=H:GenerateGUID(false) pcall(writefile,f,d) end
     end
 end
 if not d or tostring(d)=="" then K("Missing HWID") return end
+local __ea_request=request or http_request or (syn and syn.request) or (http and http.request)
+local __ea_report_url=${JSON.stringify(`${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`)}
+local __ea_stopped=false
+local __ea_source_fragments={}
+local __ea_source_ready=false
+local __ea_scrub_gui=nil
+local __ea_loadstring=loadstring
+local function __ea_block(reason)
+    if __ea_stopped then return "Blacklisted" end
+    __ea_stopped=true
+${reportAttempt}
+    if type(__ea_scrub_gui)=="function" then pcall(__ea_scrub_gui) end
+    K("Blacklisted")
+    return "Blacklisted"
+end
 
-local req=request or http_request or (syn and syn.request) or (http and http.request)
-if type(req)~="function" then K("Eternal Auth requires an HTTP request function.") return end
-
-local u=${JSON.stringify(apiUrl)}
-${protectedHeaders}
-
-local ok,result=pcall(req,{Url=u,Method="POST",Headers=headers})
-if not ok or not result then K("Eternal Auth connection failed.") return end
-
-local status=tonumber(result.StatusCode or result.status_code or result.Status or 0)
-local body=result.Body or result.body or ""
-if status~=200 then
-    if string.find(tostring(body),"Blacklisted",1,true) then
-        K("Blacklisted")
+-- Keep only sampled source fingerprints after compilation. Retaining the full
+-- source string would make getgc/environment dumps unnecessarily valuable.
+local __ea_min_fragment=96
+local function __ea_capture_source(src)
+    __ea_source_fragments={}
+    __ea_source_ready=false
+    if type(src)~="string" or src=="" then return end
+    if #src<__ea_min_fragment then
+        table.insert(__ea_source_fragments,src)
     else
-        K("Eternal Auth denied access ("..tostring(status).."). Check your key and HWID.")
+        local wanted=48
+        local maxStart=math.max(1,#src-__ea_min_fragment+1)
+        local step=math.max(__ea_min_fragment,math.floor(maxStart/wanted))
+        local pos=1
+        while pos<=maxStart and #__ea_source_fragments<wanted do
+            table.insert(__ea_source_fragments,string.sub(src,pos,pos+__ea_min_fragment-1))
+            pos=pos+step
+        end
+        local tail=string.sub(src,math.max(1,#src-__ea_min_fragment+1))
+        if tail~="" then table.insert(__ea_source_fragments,tail) end
     end
+    __ea_source_ready=#__ea_source_fragments>0
+end
+
+local function __ea_source_like(v)
+    if type(v)~="string" or not __ea_source_ready then return false end
+    for _,fragment in ipairs(__ea_source_fragments) do
+        if fragment~="" and string.find(v,fragment,1,true) then return true end
+        if #v>=16 and #v<__ea_min_fragment and string.find(fragment,v,1,true) then return true end
+    end
+    return false
+end
+
+local __ea_guard_refs={}
+local function __ea_track(env,name,expected)
+    for _,ref in ipairs(__ea_guard_refs) do
+        if ref.env==env and ref.name==name then ref.expected=expected return end
+    end
+    table.insert(__ea_guard_refs,{env=env,name=name,expected=expected})
+end
+local function __ea_envs()
+    local t={}
+    local seen={}
+    local function add(v) if type(v)=="table" and not seen[v] then seen[v]=true table.insert(t,v) end end
+    add(_G)
+    pcall(function() if getfenv then add(getfenv(0)) end end)
+    pcall(function() if getgenv then add(getgenv()) end end)
+    pcall(function() if getrenv then add(getrenv()) end end)
+    return t
+end
+
+local function __ea_wrap_global(name, mode)
+    for _,env in ipairs(__ea_envs()) do
+        pcall(function()
+            if type(env)~="table" then return end
+            local old=rawget(env,name)
+            if type(old)~="function" then return end
+            local wrap
+            if mode=="clipboard" then
+                wrap=function(...) return nil end
+            else
+                wrap=function(...)
+                    local a={...}
+                    for i=1,#a do if __ea_source_like(a[i]) then return __ea_block("console") end end
+                    return old(...)
+                end
+            end
+            env[name]=wrap
+            __ea_track(env,name,wrap)
+            pcall(function()
+                if hookfunction then old=hookfunction(old,wrap) end
+            end)
+        end)
+    end
+end
+
+-- Layer 1: normal Lua output sinks.
+for _,n in ipairs({"print","warn"}) do __ea_wrap_global(n,"filter") end
+
+-- Layer 2: executor/console output sinks.
+for _,n in ipairs({"rconsoleprint","rconsolewarn","rconsoleerr","rconsoleinfo","consoleprint","consolewarn","consoleerror"}) do
+    __ea_wrap_global(n,"filter")
+end
+
+-- Layer 3: disable clipboard reads and writes for the lifetime of the loader.
+-- This covers the common executor globals plus clipboard/syn table aliases.
+local __ea_clipboard_wrappers={}
+local function __ea_install_clipboard(env,name)
+    local okRead,old=pcall(function() return env[name] end)
+    if not okRead or type(old)~="function" then return end
+    local wrapper=__ea_clipboard_wrappers[old]
+    if not wrapper then
+        wrapper=function(...) return nil end
+        __ea_clipboard_wrappers[old]=wrapper
+        __ea_clipboard_wrappers[wrapper]=wrapper
+        if type(hookfunction)=="function" then pcall(hookfunction,old,wrapper) end
+    end
+    env[name]=wrapper
+    __ea_track(env,name,wrapper)
+end
+for _,env in ipairs(__ea_envs()) do
+    for _,name in ipairs({
+        "setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
+        "setrbxclipboard","copyclipboard","clipboardset","setclip",
+        "getclipboard","readclipboard","get_clipboard","read_clipboard","clipboardget","getclip"
+    }) do
+        pcall(__ea_install_clipboard,env,name)
+    end
+    for _,tableName in ipairs({"clipboard","Clipboard","syn"}) do
+        if type(env[tableName])=="table" then
+            for _,name in ipairs({
+                "set","write","copy","setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
+                "get","read","getclipboard","readclipboard","get_clipboard","read_clipboard","copyclipboard","setclip"
+            }) do
+                pcall(__ea_install_clipboard,env[tableName],name)
+            end
+        end
+    end
+end
+
+-- Layer 4: file-output sinks and known logger files.
+-- The supplied HTTP spy writes responses to these fixed files before our code
+-- receives control again, so block those paths even before source matching is possible.
+local __ea_blocked_logger_files={
+    ["testestzen.txt"]=true,
+    ["sabcom_hub.lua"]=true
+}
+local function __ea_blocked_path(path)
+    local p=string.lower(tostring(path or "")):gsub("\\","/")
+    local base=p:match("([^/]+)$") or p
+    return __ea_blocked_logger_files[base]==true
+end
+local __ea_known_logger_file=false
+
+for _,env in ipairs(__ea_envs()) do
+    pcall(function()
+        local rawIs=env.isfile
+        if type(rawIs)=="function" then
+            for name in pairs(__ea_blocked_logger_files) do
+                local ok,exists=pcall(rawIs,name)
+                if ok and exists then __ea_known_logger_file=true end
+            end
+        end
+    end)
+
+    for _,name in ipairs({"writefile","appendfile"}) do
+        pcall(function()
+            local old=rawget(env,name) or env[name]
+            if type(old)~="function" then return end
+            local wrap=function(path,data,...)
+                if __ea_blocked_path(path) then return nil end
+                if __ea_source_like(data) then return __ea_block("file") end
+                return old(path,data,...)
+            end
+            env[name]=wrap
+            __ea_track(env,name,wrap)
+            pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
+        end)
+    end
+
+    pcall(function()
+        local old=rawget(env,"readfile") or env.readfile
+        if type(old)=="function" then
+            local wrap=function(path,...)
+                if __ea_blocked_path(path) then return "" end
+                return old(path,...)
+            end
+            env.readfile=wrap
+            __ea_track(env,"readfile",wrap)
+        end
+    end)
+
+    pcall(function()
+        local old=rawget(env,"isfile") or env.isfile
+        if type(old)=="function" then
+            local wrap=function(path,...)
+                if __ea_blocked_path(path) then return false end
+                return old(path,...)
+            end
+            env.isfile=wrap
+            __ea_track(env,"isfile",wrap)
+        end
+    end)
+end
+
+-- Layer 5: TextBox/TextLabel/TextButton source dumping. The metamethod catches
+-- direct writes; property watchers catch executor-specific write paths and GUI
+-- viewers that reuse an existing label for multiple source pages.
+local __ea_gui_fragments={}
+local __ea_gui_fragment_bytes=0
+local __ea_text_roots={}
+local __ea_text_watched={}
+local function __ea_gui_source_like(value)
+    if __ea_source_like(value) then return true end
+    if type(value)~="string" or not __ea_source_ready or #value<8 then return false end
+    table.insert(__ea_gui_fragments,value)
+    __ea_gui_fragment_bytes=__ea_gui_fragment_bytes+#value
+    while #__ea_gui_fragments>24 or __ea_gui_fragment_bytes>262144 do
+        local removed=table.remove(__ea_gui_fragments,1)
+        __ea_gui_fragment_bytes=__ea_gui_fragment_bytes-#removed
+    end
+    if #__ea_gui_fragments<2 then return false end
+    return __ea_source_like(table.concat(__ea_gui_fragments))
+end
+local function __ea_scan_text_object(obj)
+    if __ea_stopped or __ea_text_watched[obj] then return end
+    local ok,isText=pcall(function()
+        return obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton")
+    end)
+    if not ok or not isText then return end
+    __ea_text_watched[obj]=true
+    local function scan()
+        if __ea_stopped then return end
+        local readOk,value=pcall(function() return obj.Text end)
+        if readOk and __ea_gui_source_like(value) then
+            pcall(function() obj.Text="Blacklisted" end)
+            __ea_block("gui")
+        end
+    end
+    scan()
+    pcall(function() obj:GetPropertyChangedSignal("Text"):Connect(scan) end)
+end
+local function __ea_watch_text_root(root)
+    if not root then return end
+    table.insert(__ea_text_roots,root)
+    __ea_scan_text_object(root)
+    pcall(function() for _,obj in ipairs(root:GetDescendants()) do __ea_scan_text_object(obj) end end)
+    pcall(function() root.DescendantAdded:Connect(function(obj) task.defer(__ea_scan_text_object,obj) end) end)
+end
+__ea_scrub_gui=function()
+    local seen={}
+    local function replace(obj)
+        if seen[obj] then return end
+        seen[obj]=true
+        pcall(function()
+            if obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton") then
+                obj.Text="Blacklisted"
+            end
+        end)
+    end
+    for _,root in ipairs(__ea_text_roots) do
+        replace(root)
+        pcall(function() for _,obj in ipairs(root:GetDescendants()) do replace(obj) end end)
+    end
+end
+pcall(function()
+    if not hookmetamethod or not newcclosure then return end
+    local oldNewIndex
+    oldNewIndex=hookmetamethod(game,"__newindex",newcclosure(function(obj,keyName,value)
+        if keyName=="Text" and __ea_gui_source_like(value) then
+            local ok,isText=pcall(function()
+                return obj:IsA("TextBox") or obj:IsA("TextLabel") or obj:IsA("TextButton")
+            end)
+            if ok and isText then
+                oldNewIndex(obj,keyName,"Blacklisted")
+                __ea_block("gui")
+                return
+            end
+        end
+        return oldNewIndex(obj,keyName,value)
+    end))
+end)
+pcall(function() if type(gethui)=="function" then __ea_watch_text_root(gethui()) end end)
+pcall(function() __ea_watch_text_root(game:GetService("CoreGui")) end)
+pcall(function() if lp then __ea_watch_text_root(lp:FindFirstChildOfClass("PlayerGui")) end end)
+
+-- Layer 6: common executor HTTP/request exfiltration sinks. Requests only get
+-- blocked when their outgoing body contains source-like text.
+for _,env in ipairs(__ea_envs()) do
+    for _,name in ipairs({"request","http_request","httprequest"}) do
+        pcall(function()
+            local old=rawget(env,name)
+            if type(old)~="function" then return end
+            local wrap=function(opts,...)
+                if type(opts)=="table" then
+                    local body=opts.Body or opts.body or opts.Data or opts.data
+                    if __ea_source_like(body) then __ea_block("network") return {Success=false,StatusCode=403,Body="Blacklisted"} end
+                elseif __ea_source_like(opts) then
+                    return __ea_block("network")
+                end
+                return old(opts,...)
+            end
+            env[name]=wrap
+            __ea_track(env,name,wrap)
+            pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
+        end)
+    end
+    pcall(function()
+        if type(env.syn)=="table" and type(env.syn.request)=="function" then
+            local old=env.syn.request
+            local wrap=function(opts,...)
+                local body=type(opts)=="table" and (opts.Body or opts.body or opts.Data or opts.data) or nil
+                if __ea_source_like(body) then __ea_block("network") return {Success=false,StatusCode=403,Body="Blacklisted"} end
+                return old(opts,...)
+            end
+            env.syn.request=wrap
+            __ea_track(env.syn,"request",wrap)
+            pcall(function() if hookfunction then old=hookfunction(old,wrap) end end)
+        end
+    end)
+end
+
+-- Layer 7: detect common HTTP/source/remote spy interfaces, including ones
+-- inserted after startup. Exact multi-word signatures reduce false positives.
+local __ea_spy_signatures={
+    "http spy","http logger","httpspy","http_spy","httplogger",
+    "remote spy","remote logger","remotespy","simple spy","simplespy",
+    "source viewer","script viewer","lua viewer","hydroxide",
+    "websocket spy","websocket logger","ws spy","ws logger","network logger",
+    "packet logger","source dumper","script dumper","decompiler","hook spy","hookspy"
+}
+local function __ea_spy_like(v)
+    if type(v)~="string" then return false end
+    local s=string.lower(v)
+    for _,sig in ipairs(__ea_spy_signatures) do
+        if string.find(s,sig,1,true) then return true end
+    end
+    return false
+end
+local function __ea_scan_spy_object(obj)
+    pcall(function()
+        if __ea_spy_like(obj.Name) then __ea_block("http_spy") return end
+        if (obj:IsA("TextLabel") or obj:IsA("TextBox") or obj:IsA("TextButton")) and __ea_spy_like(obj.Text) then
+            obj.Text="Blacklisted"
+            __ea_block("http_spy")
+        end
+    end)
+end
+local function __ea_watch_spy_root(root)
+    if not root then return end
+    __ea_scan_spy_object(root)
+    pcall(function() for _,obj in ipairs(root:GetDescendants()) do __ea_scan_spy_object(obj) end end)
+    pcall(function() root.DescendantAdded:Connect(function(obj) task.defer(__ea_scan_spy_object,obj) end) end)
+end
+pcall(function() if type(gethui)=="function" then __ea_watch_spy_root(gethui()) end end)
+pcall(function() __ea_watch_spy_root(game:GetService("CoreGui")) end)
+pcall(function() if lp then __ea_watch_spy_root(lp:FindFirstChildOfClass("PlayerGui")) end end)
+for _,env in ipairs(__ea_envs()) do
+    pcall(function()
+        for name,value in pairs(env) do
+            if __ea_spy_like(name) and (type(value)=="function" or type(value)=="table") then
+                __ea_block("http_spy") return
+            end
+        end
+    end)
+end
+
+-- Layer 8: high-confidence source-extraction guard. Do not block ordinary
+-- getgenv/getfenv/gethui/debug/hook APIs: protected hubs commonly use those
+-- during startup and treating them as hostile causes immediate false bans.
+local __ea_logger_envs=__ea_envs()
+local __ea_hook_fn=hookfunction
+local function __ea_install_environment_guard(env,name)
+    local old=rawget(env,name)
+    if type(old)~="function" then return end
+    local wrap=function(...) return __ea_block("environment") end
+    env[name]=wrap
+    __ea_track(env,name,wrap)
+    pcall(function() if __ea_hook_fn then __ea_hook_fn(old,wrap) end end)
+end
+for _,env in ipairs(__ea_logger_envs) do
+    for _,name in ipairs({
+        "getscriptclosure","getscriptbytecode","getscriptfunction","getscriptfunc",
+        "dumpstring","decompile","getsenv","getscriptfromthread","getscriptfromfunction"
+    }) do
+        pcall(__ea_install_environment_guard,env,name)
+    end
+end
+
+-- Layer 9: lightweight integrity watchdog. If high-value guards are replaced,
+-- terminate this client session rather than continuing with weakened guards.
+task.spawn(function()
+    while not __ea_stopped and task.wait(2.5) do
+        for _,ref in ipairs(__ea_guard_refs) do
+            if rawget(ref.env,ref.name)~=ref.expected then
+                __ea_block("integrity") return
+            end
+        end
+    end
+end)
+
+-- Reject the logger pattern where native request/loadstring/require or
+-- WebSocket constructors were replaced before Eternal Auth ran. Heuristic
+-- matches stop this execution only; they do not permanently blacklist a HWID.
+local function __ea_obviously_hooked(fn)
+    if type(fn)~="function" then return false end
+    local ok,result=pcall(function()
+        if type(islclosure)=="function" and islclosure(fn) then return true end
+        if type(iscclosure)=="function" then return not iscclosure(fn) end
+        return false
+    end)
+    return ok and result==true
+end
+
+local function __ea_websocket_hook_score()
+    local score=0
+    local seen={}
+    local function checkTable(t)
+        if type(t)~="table" or seen[t] then return end
+        seen[t]=true
+        for _,name in ipairs({"connect","Connect","new","New","Create"}) do
+            local fn=t[name]
+            if type(fn)=="function" and __ea_obviously_hooked(fn) then
+                score=1
+                return
+            end
+        end
+    end
+    for _,env in ipairs(__ea_envs()) do
+        checkTable(env.WebSocket)
+        checkTable(env.websocket)
+        checkTable(env.Websocket)
+        if type(env.syn)=="table" then
+            checkTable(env.syn.websocket)
+            checkTable(env.syn.WebSocket)
+        end
+    end
+    return score
+end
+
+local function __ea_http_alias_hook_score()
+    local score=0
+    local seen={}
+    local function check(fn)
+        if type(fn)=="function" and not seen[fn] then
+            seen[fn]=true
+            if __ea_obviously_hooked(fn) then score=score+1 end
+        end
+    end
+    for _,env in ipairs(__ea_envs()) do
+        check(env.request)
+        check(env.http_request)
+        check(env.httprequest)
+        if type(env.syn)=="table" then check(env.syn.request) end
+        if type(env.http)=="table" then check(env.http.request) end
+    end
+    return math.min(score,2)
+end
+
+local __ea_hook_score=0
+if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
+if __ea_obviously_hooked(__ea_request) then __ea_hook_score=__ea_hook_score+2 end
+if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
+if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
+__ea_hook_score=__ea_hook_score+__ea_http_alias_hook_score()
+__ea_hook_score=__ea_hook_score+__ea_websocket_hook_score()
+
+if __ea_known_logger_file or __ea_hook_score>=3 then
+    K("Security logger detected.")
     return
 end
 
-if type(loadstring)~="function" then
-    K("This executor does not support loadstring.")
+local function __ea_hwid_spoofed()
+    for _,env in ipairs(__ea_envs()) do
+        for _,name in ipairs({"RbxGetIdentity","__Identify"}) do
+            local ok,fn=pcall(function() return env[name] end)
+            if ok and type(fn)=="function" then
+                if __ea_obviously_hooked(fn) then return true end
+                local okValue,value=pcall(fn)
+                if okValue and type(value)=="string" and #value>=32 and value:match("^[a-fA-F0-9]+$") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+if __ea_hwid_spoofed() then __ea_block("hwid_spoof") return end
+
+${protectedUrl}
+${protectedHeaders}
+if not __ea_request then K("Eternal Auth requires an HTTP request function.") return end
+local verified,result=pcall(__ea_request,{Url=u,Method="POST",Headers=__ea_source_headers})
+if not verified or not result then K("Eternal Auth connection failed.") return end
+local code=tonumber(result.StatusCode or result.status_code or 0)
+local s=result.Body or result.body or ""
+if code~=200 then
+    if string.find(s,"Blacklisted",1,true) then K("Blacklisted")
+    else K("Eternal Auth denied access ("..tostring(code).."). Check your key and HWID.") end
     return
 end
+if __ea_stopped then return end
+__ea_capture_source(s)
+-- Catch source placed into a GUI immediately before the protected response was
+-- assigned, then keep property watchers active for later page changes.
+for _,root in ipairs(__ea_text_roots) do
+    pcall(function() for _,obj in ipairs(root:GetDescendants()) do
+        __ea_text_watched[obj]=nil
+        __ea_scan_text_object(obj)
+    end end)
+end
+if __ea_stopped then return end
 
-local fn,compileErr=loadstring(body)
+local f,err=__ea_loadstring(s)
 pcall(function()
     result.Body=""
     result.body=""
 end)
-body=nil
-
-if not fn then
-    K("Eternal Auth loader error: "..tostring(compileErr))
-    return
-end
-
-local ran,runErr=pcall(fn)
-fn=nil
-if not ran then
-    error(runErr,0)
-end`;
+s=nil
+if not f then K("Eternal Auth loader error: "..tostring(err)) return end
+local okRun,runErr=pcall(f)
+f=nil
+if not okRun then error(runErr,0) end`;
 }
+
+
+let backendSchemaReadyPromise = null;
 
 async function ensureBackendPersistenceSchema(env) {
   if (backendSchemaReadyPromise) return backendSchemaReadyPromise;

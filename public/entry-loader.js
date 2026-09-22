@@ -213,7 +213,7 @@ end
 if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
-${clientHardeningLua()}
+
 local __ea_loadstring=loadstring
 local __ea_hook_score=0
 if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
@@ -254,7 +254,7 @@ end
 if not d or tostring(d)=="" then stop() return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if not req then stop() return end
-${clientHardeningLua()}
+
 local __ea_loadstring=loadstring
 local __ea_hook_score=0
 if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end

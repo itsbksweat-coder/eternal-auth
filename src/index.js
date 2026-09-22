@@ -468,10 +468,12 @@ export default {
         )
       ) {
         return new Response(null, {
-          status: 404,
+          status: 204,
           headers: {
+            "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store",
             "x-content-type-options": "nosniff",
+            "x-frame-options": "DENY",
           },
         });
       }
@@ -561,8 +563,9 @@ export default {
       // unavailable static-assets binding from turning ordinary site visits
       // into a Worker 500.
       return new Response(null, {
-        status: 404,
+        status: 204,
         headers: {
+          "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
           "x-content-type-options": "nosniff",
           "x-frame-options": "DENY",

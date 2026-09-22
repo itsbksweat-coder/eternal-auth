@@ -180,6 +180,43 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(await response.text(),'Access denied');
 });
 
+test('panel-scoped valid key resolves its assigned script even when loader URL id is stale', async () => {
+  const {db,env}=await fixture();
+  db.prepare("UPDATE licenses SET panel_id='p' WHERE id='l'").run();
+
+  const request=new Request('https://auth.test/files/v4/loaders/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.lua',{
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'panel-stale-device',
+      'x-eternal-execute':'1',
+    }
+  });
+
+  const response=await api.handlePublicLoader(request,env,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',{waitUntil(){}});
+  assert.equal(response.status,200);
+  const bootstrap=await response.text();
+  assert.match(bootstrap,/script_id=s/);
+  assert.ok(ticketFromBootstrap(bootstrap));
+});
+
+test('unscoped valid key resolves sole enabled project script when loader URL id is stale', async () => {
+  const {env}=await fixture();
+
+  const request=new Request('https://auth.test/files/v4/loaders/cccccccccccccccccccccccccccccccc.lua',{
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'single-stale-device',
+      'x-eternal-execute':'1',
+    }
+  });
+
+  const response=await api.handlePublicLoader(request,env,'cccccccccccccccccccccccccccccccc',{waitUntil(){}});
+  assert.equal(response.status,200);
+  const bootstrap=await response.text();
+  assert.match(bootstrap,/script_id=s/);
+  assert.ok(ticketFromBootstrap(bootstrap));
+});
+
 test('authenticated loader repairs a missing project row from matching license and script', async () => {
   const {db,env}=await fixture();
   db.exec('PRAGMA foreign_keys=OFF');

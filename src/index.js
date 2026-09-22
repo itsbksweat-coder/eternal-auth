@@ -603,10 +603,16 @@ export default {
       }
 
       if (url.pathname.startsWith("/api/admin/")) {
-        await ensureBackendPersistenceSchema(env);
-        const session = await verifyAdminSession(request, env);
-        if (!session) return json({ ok: false, error: "Unauthorized" }, 401);
-        return handleAdminApi(request, env, url, ctx);
+        try {
+          await ensureBackendPersistenceSchema(env);
+          const session = await verifyAdminSession(request, env);
+          if (!session) return json({ ok: false, error: "Unauthorized" }, 401);
+          return await handleAdminApi(request, env, url, ctx);
+        } catch (error) {
+          console.error("Admin API failed", url.pathname, error);
+          const detail = String(error?.message || error || "Unknown backend error").slice(0, 240);
+          return json({ ok: false, error: `Backend error on ${url.pathname}: ${detail}` }, 500);
+        }
       }
 
       if (url.pathname === "/api/health" && request.method === "GET") {
@@ -1809,16 +1815,106 @@ async function ensureBackendPersistenceSchema(env) {
   backendSchemaReadyPromise = (async () => {
     await ensureAdminAuthSchema(env);
 
-    await tryD1("runtime_state table", () =>
-      env.DB.prepare(`CREATE TABLE IF NOT EXISTS runtime_state (
+    // Create every current backend table if it is missing. CREATE TABLE IF NOT
+    // EXISTS is safe on existing databases; legacy columns are repaired below.
+    const creates = [
+      `CREATE TABLE IF NOT EXISTS guilds (
+        guild_id TEXT PRIMARY KEY,
+        active INTEGER NOT NULL DEFAULT 1,
+        manager_role_id TEXT,
+        buyer_role_id TEXT,
+        log_webhook_enc TEXT,
+        base_url TEXT,
+        loader_template TEXT,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS server_setup_keys (
+        id TEXT PRIMARY KEY,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_hint TEXT NOT NULL,
+        key_enc TEXT,
+        intended_guild_id TEXT,
+        note TEXT,
+        expires_at INTEGER NOT NULL DEFAULT -1,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        used_at INTEGER,
+        used_by_guild_id TEXT,
+        used_by_discord_id TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS licenses (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        discord_id TEXT,
+        panel_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        auth_expire INTEGER NOT NULL DEFAULT -1,
+        note TEXT,
+        hwid_hash TEXT,
+        last_hwid_reset INTEGER,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS blacklists (
+        guild_id TEXT NOT NULL,
+        discord_id TEXT NOT NULL,
+        reason TEXT,
+        expires_at INTEGER NOT NULL DEFAULT -1,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, discord_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS redeem_codes (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        code_hash TEXT NOT NULL UNIQUE,
+        days INTEGER NOT NULL DEFAULT -1,
+        uses_left INTEGER NOT NULL DEFAULT 1,
+        note TEXT,
+        expires_at INTEGER NOT NULL DEFAULT -1,
+        created_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS scripts (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        loader_id TEXT UNIQUE,
+        name TEXT NOT NULL DEFAULT 'Eternal Auth Script',
+        version TEXT NOT NULL DEFAULT '1.0.0',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        ffa_enabled INTEGER NOT NULL DEFAULT 0,
+        content TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS executions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT NOT NULL,
+        license_id TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT,
+        action TEXT NOT NULL DEFAULT '',
+        actor_id TEXT,
+        target TEXT,
+        details TEXT,
+        created_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS hwid_blacklists (
+        guild_id TEXT NOT NULL,
+        hwid_hash TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT 'manual',
+        license_id TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, hwid_hash)
+      )`,
+      `CREATE TABLE IF NOT EXISTS runtime_state (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`).run()
-    );
-
-    await tryD1("panels table", () =>
-      env.DB.prepare(`CREATE TABLE IF NOT EXISTS panels (
+        updated_at INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE TABLE IF NOT EXISTS panels (
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
         name TEXT NOT NULL DEFAULT 'Eternal Auth Panel',
@@ -1828,99 +1924,170 @@ async function ensureBackendPersistenceSchema(env) {
         loader_template TEXT,
         active INTEGER NOT NULL DEFAULT 1,
         created_by TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`).run()
-    );
-
-    await tryD1("panel_drafts table", () =>
-      env.DB.prepare(`CREATE TABLE IF NOT EXISTS panel_drafts (
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        embed_title TEXT,
+        embed_description TEXT,
+        embed_color INTEGER,
+        script_id TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS panel_drafts (
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
         channel_id TEXT,
         manager_role_id TEXT,
         buyer_role_id TEXT,
-        loader_template TEXT NOT NULL,
+        loader_template TEXT NOT NULL DEFAULT '',
         uploaded_loader_url TEXT,
         selected_script_id TEXT,
-        created_by TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-      )`).run()
-    );
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER NOT NULL DEFAULT 0
+      )`,
+    ];
 
-    const tableInfo = await tryD1("server_setup_keys info", () =>
-      env.DB.prepare("PRAGMA table_info(server_setup_keys)").all()
-    );
-    const columns = Array.isArray(tableInfo?.results) ? tableInfo.results : [];
-    if (columns.length && !columns.some((column) => String(column.name) === "key_enc")) {
-      await tryD1("server_setup_keys.key_enc", () =>
-        env.DB.prepare("ALTER TABLE server_setup_keys ADD COLUMN key_enc TEXT").run()
-      );
+    for (const sql of creates) {
+      await env.DB.prepare(sql).run();
     }
 
-    const panelInfo = await tryD1("panels info", () => env.DB.prepare("PRAGMA table_info(panels)").all());
-    const panelColumns = Array.isArray(panelInfo?.results) ? panelInfo.results : [];
-    const panelColumnNames = new Set(panelColumns.map((column) => String(column.name)));
-    const panelAdds = [
-      ["active", "INTEGER NOT NULL DEFAULT 1"],
-      ["created_at", "INTEGER NOT NULL DEFAULT 0"],
-      ["updated_at", "INTEGER NOT NULL DEFAULT 0"],
-      ["embed_title", "TEXT"],
-      ["embed_description", "TEXT"],
-      ["embed_color", "INTEGER"],
-      ["script_id", "TEXT"],
-    ];
-    for (const [name, definition] of panelAdds) {
-      if (panelColumns.length && !panelColumnNames.has(name)) {
-        await tryD1(`panels.${name}`, () =>
-          env.DB.prepare(`ALTER TABLE panels ADD COLUMN ${name} ${definition}`).run()
-        );
+    async function ensureColumns(table, definitions) {
+      const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+      const names = new Set((info?.results || []).map((row) => String(row.name)));
+      for (const [name, definition] of Object.entries(definitions)) {
+        if (names.has(name)) continue;
+        await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`).run();
+        names.add(name);
       }
     }
-    await tryD1("panels index", () =>
-      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_panels_guild_active ON panels(guild_id, active, created_at DESC)").run()
-    );
 
-    const draftInfo = await tryD1("panel_drafts info", () => env.DB.prepare("PRAGMA table_info(panel_drafts)").all());
-    const draftColumns = Array.isArray(draftInfo?.results) ? draftInfo.results : [];
-    const draftNames = new Set(draftColumns.map((column) => String(column.name)));
-    if (draftColumns.length && !draftNames.has("expires_at")) {
-      await tryD1("panel_drafts.expires_at", () =>
-        env.DB.prepare("ALTER TABLE panel_drafts ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0").run()
-      );
-    }
-    await tryD1("panel_drafts index", () =>
-      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_panel_drafts_expires ON panel_drafts(expires_at)").run()
-    );
+    await ensureColumns("guilds", {
+      active: "INTEGER NOT NULL DEFAULT 1",
+      manager_role_id: "TEXT",
+      buyer_role_id: "TEXT",
+      log_webhook_enc: "TEXT",
+      base_url: "TEXT",
+      loader_template: "TEXT",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+      updated_at: "INTEGER NOT NULL DEFAULT 0",
+    });
 
-    const scriptInfo = await tryD1("scripts info", () => env.DB.prepare("PRAGMA table_info(scripts)").all());
-    const scriptColumns = Array.isArray(scriptInfo?.results) ? scriptInfo.results : [];
-    if (scriptColumns.length && !scriptColumns.some((column) => String(column.name) === "ffa_enabled")) {
-      await tryD1("scripts.ffa_enabled", () =>
-        env.DB.prepare("ALTER TABLE scripts ADD COLUMN ffa_enabled INTEGER NOT NULL DEFAULT 0").run()
-      );
+    await ensureColumns("server_setup_keys", {
+      key_hint: "TEXT NOT NULL DEFAULT ''",
+      key_enc: "TEXT",
+      intended_guild_id: "TEXT",
+      note: "TEXT",
+      expires_at: "INTEGER NOT NULL DEFAULT -1",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+      used_at: "INTEGER",
+      used_by_guild_id: "TEXT",
+      used_by_discord_id: "TEXT",
+    });
+
+    await ensureColumns("licenses", {
+      discord_id: "TEXT",
+      panel_id: "TEXT",
+      status: "TEXT NOT NULL DEFAULT 'active'",
+      auth_expire: "INTEGER NOT NULL DEFAULT -1",
+      note: "TEXT",
+      hwid_hash: "TEXT",
+      last_hwid_reset: "INTEGER",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+      updated_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("blacklists", {
+      reason: "TEXT",
+      expires_at: "INTEGER NOT NULL DEFAULT -1",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("redeem_codes", {
+      days: "INTEGER NOT NULL DEFAULT -1",
+      uses_left: "INTEGER NOT NULL DEFAULT 1",
+      note: "TEXT",
+      expires_at: "INTEGER NOT NULL DEFAULT -1",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("scripts", {
+      loader_id: "TEXT",
+      name: "TEXT NOT NULL DEFAULT 'Eternal Auth Script'",
+      version: "TEXT NOT NULL DEFAULT '1.0.0'",
+      enabled: "INTEGER NOT NULL DEFAULT 1",
+      ffa_enabled: "INTEGER NOT NULL DEFAULT 0",
+      content: "TEXT NOT NULL DEFAULT ''",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+      updated_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("executions", {
+      occurred_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("audit_logs", {
+      guild_id: "TEXT",
+      action: "TEXT NOT NULL DEFAULT ''",
+      actor_id: "TEXT",
+      target: "TEXT",
+      details: "TEXT",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("hwid_blacklists", {
+      reason: "TEXT NOT NULL DEFAULT 'manual'",
+      license_id: "TEXT NOT NULL DEFAULT ''",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    await ensureColumns("panels", {
+      name: "TEXT NOT NULL DEFAULT 'Eternal Auth Panel'",
+      channel_id: "TEXT",
+      manager_role_id: "TEXT",
+      buyer_role_id: "TEXT",
+      loader_template: "TEXT",
+      active: "INTEGER NOT NULL DEFAULT 1",
+      created_by: "TEXT",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+      updated_at: "INTEGER NOT NULL DEFAULT 0",
+      embed_title: "TEXT",
+      embed_description: "TEXT",
+      embed_color: "INTEGER",
+      script_id: "TEXT",
+    });
+
+    await ensureColumns("panel_drafts", {
+      channel_id: "TEXT",
+      manager_role_id: "TEXT",
+      buyer_role_id: "TEXT",
+      loader_template: "TEXT NOT NULL DEFAULT ''",
+      uploaded_loader_url: "TEXT",
+      selected_script_id: "TEXT",
+      created_by: "TEXT NOT NULL DEFAULT ''",
+      created_at: "INTEGER NOT NULL DEFAULT 0",
+      expires_at: "INTEGER NOT NULL DEFAULT 0",
+    });
+
+    const indexes = [
+      "CREATE INDEX IF NOT EXISTS idx_server_setup_keys_created ON server_setup_keys(created_at DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_licenses_guild_discord ON licenses(guild_id, discord_id)",
+      "CREATE INDEX IF NOT EXISTS idx_licenses_guild_status ON licenses(guild_id, status)",
+      "CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)",
+      "CREATE INDEX IF NOT EXISTS idx_redeem_codes_guild ON redeem_codes(guild_id)",
+      "CREATE INDEX IF NOT EXISTS idx_scripts_guild ON scripts(guild_id, created_at)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_scripts_loader_id ON scripts(loader_id)",
+      "CREATE INDEX IF NOT EXISTS idx_executions_license_time ON executions(license_id, occurred_at DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(created_at DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_panels_guild_active ON panels(guild_id, active, created_at DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_panel_drafts_expires ON panel_drafts(expires_at)",
+    ];
+    for (const sql of indexes) {
+      await tryD1("index repair", () => env.DB.prepare(sql).run());
     }
 
-    const licenseInfo = await tryD1("licenses info", () => env.DB.prepare("PRAGMA table_info(licenses)").all());
-    const licenseColumns = Array.isArray(licenseInfo?.results) ? licenseInfo.results : [];
-    const licenseNames = new Set(licenseColumns.map((column) => String(column.name)));
-    if (licenseColumns.length && !licenseNames.has("panel_id")) {
-      await tryD1("licenses.panel_id", () =>
-        env.DB.prepare("ALTER TABLE licenses ADD COLUMN panel_id TEXT").run()
-      );
-    }
-    if (!licenseColumns.length || licenseNames.has("panel_id")) {
-      await tryD1("licenses panel index", () =>
-        env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)").run()
-      );
-    } else {
-      // The ALTER may have just succeeded; retry the index without making
-      // dashboard authentication depend on it.
-      await tryD1("licenses panel index after migration", () =>
-        env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)").run()
-      );
-    }
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO admin_state (id, active_tab, preferences_json, updated_at)
+       VALUES ('primary', 'gateway', '{}', ?)`
+    ).bind(now()).run();
 
     return true;
   })().catch((error) => {

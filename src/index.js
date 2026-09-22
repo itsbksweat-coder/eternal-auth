@@ -1508,15 +1508,67 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
   let script = await env.DB.prepare("SELECT * FROM scripts WHERE loader_id = ? LIMIT 1")
     .bind(loaderId)
     .first();
-  let guild = null;
 
+  // Older databases can contain a stale/null loader_id. Re-derive loader ids
+  // only inside the authenticated license's project and repair the matching row.
+  if (!script) {
+    const candidates = await env.DB.prepare(
+      "SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC"
+    ).bind(license.guild_id).all();
+
+    for (const candidate of candidates.results || []) {
+      const expectedLoaderId = await deriveScriptLoaderId(env, candidate.id);
+      if (String(expectedLoaderId).toLowerCase() !== String(loaderId).toLowerCase()) continue;
+      script = { ...candidate, loader_id: expectedLoaderId };
+      if (candidate.loader_id !== expectedLoaderId) {
+        await env.DB.prepare("UPDATE scripts SET loader_id = ?, updated_at = ? WHERE id = ?")
+          .bind(expectedLoaderId, now(), candidate.id)
+          .run();
+        cacheDelete(scriptHotCache, `${candidate.guild_id}:all`);
+        cacheDelete(scriptHotCache, `${candidate.guild_id}:enabled`);
+      }
+      break;
+    }
+  }
+
+  let guild = null;
   if (script) {
-    script = await ensureScriptLoaderId(env, script);
-    guild = await getGuild(env, script.guild_id);
+    // Do not use getGuild() here because it intentionally filters active=1,
+    // which made disabled/legacy projects look like they did not exist.
+    const rawGuild = await env.DB.prepare(
+      "SELECT * FROM guilds WHERE guild_id = ? LIMIT 1"
+    ).bind(script.guild_id).first();
+    guild = rawGuild ? await ensureGuildLoaderId(env, rawGuild) : null;
+
+    // If an old migration lost the guild row but the authenticated license and
+    // script still agree on the project, rebuild the minimal project record.
+    if (!guild && String(script.guild_id) === String(license.guild_id)) {
+      const origin = new URL(request.url).origin;
+      const timestamp = now();
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO guilds
+          (guild_id, active, base_url, loader_template, created_at, updated_at)
+         VALUES (?, 1, ?, ?, ?, ?)`
+      ).bind(
+        license.guild_id,
+        origin,
+        defaultLoaderTemplate(),
+        timestamp,
+        timestamp,
+      ).run();
+      cacheDelete(guildHotCache, license.guild_id);
+      const repairedGuild = await env.DB.prepare(
+        "SELECT * FROM guilds WHERE guild_id = ? LIMIT 1"
+      ).bind(license.guild_id).first();
+      guild = repairedGuild ? await ensureGuildLoaderId(env, repairedGuild) : null;
+    }
   } else {
     // Backward compatibility for the old one-loader-per-guild URLs.
     const legacyGuildId = await guildIdFromLoaderId(env, loaderId);
-    guild = legacyGuildId ? await getGuild(env, legacyGuildId) : null;
+    const rawGuild = legacyGuildId
+      ? await env.DB.prepare("SELECT * FROM guilds WHERE guild_id = ? LIMIT 1").bind(legacyGuildId).first()
+      : null;
+    guild = rawGuild ? await ensureGuildLoaderId(env, rawGuild) : null;
     if (guild) {
       script = await env.DB.prepare("SELECT * FROM scripts WHERE guild_id = ? ORDER BY created_at ASC LIMIT 1")
         .bind(guild.guild_id)
@@ -1525,9 +1577,9 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     }
   }
 
-  if (!guild) return deniedSource("Project not found");
   if (!script) return deniedSource("Script not found");
-  if (!guild.active) return deniedSource("Project disabled");
+  if (!guild) return deniedSource("Project record missing");
+  if (!Number(guild.active)) return deniedSource("Project disabled");
   if (!script.enabled) return deniedSource("Script disabled");
   if (!script.content) return deniedSource("Script source is empty");
   if (license.guild_id !== guild.guild_id) return deniedSource("Key belongs to a different project");

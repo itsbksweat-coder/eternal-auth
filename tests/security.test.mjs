@@ -122,35 +122,18 @@ test('concurrent first binds only release code to the winning device', async () 
   const responses = await Promise.all(['a','b'].map(deviceId => secureProtectedResponse(env,{key:'valid-key',deviceId,scriptId:'s'})));
   assert.deepEqual(responses.map(r=>r.status).sort(), [200,403]);
 });
-test('reset default is five minutes and bootstrap is syntactically generated', () => {
+test('reset default is five minutes and compatibility bootstrap is syntactically generated', () => {
   assert.equal(hwidCooldownSeconds({}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'5'}),300);
   assert.equal(hwidCooldownSeconds({HWID_RESET_COOLDOWN_MINUTES:'bad'}),300);
   const lua=api.buildBootstrapSource('https://auth.test','s');
-  assert.match(lua,/https:\/\/auth.test\/api\/v1\/security\/report/);
-  assert.match(lua,/__ea_capture_source\(s\)/);
-  assert.match(lua,/s=nil/);
-  assert.doesNotMatch(lua,/__ea_protected_source=s/);
+  assert.match(lua,/https:\/\/auth.test\/api\/v1\/loader\?script_id=s/);
+  assert.match(lua,/X-Eternal-Ticket/);
+  assert.match(lua,/X-Eternal-Execute/);
+  assert.match(lua,/loadstring\(body\)/);
+  assert.match(lua,/body=nil/);
   assert.doesNotMatch(lua,/\$\{/);
-  const extractionLayer=lua.slice(lua.indexOf('-- Layer 8:'),lua.indexOf('-- Layer 9:'));
-  assert.match(extractionLayer,/decompile|getscriptbytecode/);
-  assert.doesNotMatch(extractionLayer,/"getgenv"|"getfenv"|"gethui"|"hookfunction"|"hookmetamethod"/);
-  const guiLayer=lua.slice(lua.indexOf('-- Layer 5:'),lua.indexOf('-- Layer 6:'));
-  assert.match(guiLayer,/TextBox/);
-  assert.match(guiLayer,/TextLabel/);
-  assert.match(guiLayer,/TextButton/);
-  assert.match(guiLayer,/GetPropertyChangedSignal\("Text"\)/);
-  assert.match(guiLayer,/__ea_gui_fragments/);
-  assert.match(guiLayer,/__ea_scrub_gui=function\(\)/);
-  assert.match(guiLayer,/obj\.Text="Blacklisted"/);
-  assert.match(lua,/if type\(__ea_scrub_gui\)=="function" then pcall\(__ea_scrub_gui\) end/);
-  const clipboardLayer=lua.slice(lua.indexOf('-- Layer 3:'),lua.indexOf('-- Layer 4:'));
-  assert.match(clipboardLayer,/copyclipboard/);
-  assert.match(clipboardLayer,/clipboardset/);
-  assert.match(clipboardLayer,/setclip/);
-  assert.match(clipboardLayer,/return env\[name\]/);
-  assert.match(clipboardLayer,/"clipboard","Clipboard","syn"/);
-  assert.match(lua,/getfenv\(0\)/);
+  assert.doesNotMatch(lua,/__ea_capture_source|hookfunction|decompile|getscriptbytecode|setclipboard|TextLabel|TextBox/);
 });
 
 test('FFA is keyless, requires a device, respects the switch and returns protected source', async () => {
@@ -162,11 +145,10 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(response.status,200);
   const bootstrap=await response.text();
   assert.match(bootstrap,/api\/v1\/ffa-loader/);
-  assert.match(bootstrap,/api\/v1\/ffa\/security\/report/);
-  assert.match(bootstrap,/environment/);
-  assert.match(bootstrap,/http_spy/);
-  assert.match(bootstrap,/http logger/);
-  assert.match(bootstrap,/hookmetamethod/);
+  assert.match(bootstrap,/X-Eternal-Ticket/);
+  assert.match(bootstrap,/X-Eternal-Execute/);
+  assert.match(bootstrap,/loadstring\(body\)/);
+  assert.doesNotMatch(bootstrap,/environment|http_spy|http logger|hookmetamethod/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,200);

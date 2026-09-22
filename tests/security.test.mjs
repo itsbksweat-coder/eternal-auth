@@ -7,7 +7,7 @@ let source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
 source = source.replace('import { DurableObject } from "cloudflare:workers";', 'class DurableObject {}');
 for (const file of ['dm-responder.js', 'device-security.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
 source = source.replace('"../public/entry-loader.js"', JSON.stringify(new URL('../public/entry-loader.js', import.meta.url).href));
-source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource };';
+source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource, ensureBackendPersistenceSchema };';
 const api = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 async function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -86,6 +86,11 @@ async function secureFfaResponse(env, { deviceId='ffa-device', scriptId='s', loa
   });
   return api.handleFfaProtectedLoader(stage2, env);
 }
+test('backend schema initializer has valid shared state and runs successfully', async () => {
+  const {env}=await fixture();
+  await assert.doesNotReject(() => api.ensureBackendPersistenceSchema(env));
+});
+
 test('missing key and missing HWID return no protected source', async () => {
   const { env } = await fixture();
   for (const params of [{}, {key:'valid-key'}, {key:'wrong',device_id:'a'}]) {

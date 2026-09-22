@@ -11,6 +11,22 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
+const PERSISTENT_SECURITY_REASONS = new Set([
+  "gui",
+  "clipboard",
+  "file",
+  "console",
+  "network",
+]);
+
+const NON_PERSISTENT_SECURITY_REASONS = new Set([
+  "loader_probe",
+  "integrity",
+  "environment",
+  "http_spy",
+  "hwid_spoof",
+]);
+
 const EPHEMERAL = 1 << 6;
 const ADMINISTRATOR = 1n << 3n;
 
@@ -1039,11 +1055,11 @@ async function isBlacklisted(env, guildId, discordId) {
 async function recoverLegacyLoaderProbe(env, license, deviceHash) {
   if (!license || !deviceHash) return false;
   const falsePositive = await env.DB.prepare(
-    "SELECT 1 AS found FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ? AND reason = 'loader_probe' LIMIT 1"
+    "SELECT reason FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ? LIMIT 1"
   ).bind(license.guild_id, deviceHash, license.id).first();
-  if (!falsePositive) return false;
+  if (!falsePositive || !NON_PERSISTENT_SECURITY_REASONS.has(String(falsePositive.reason || ""))) return false;
   await env.DB.batch([
-    env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ? AND reason = 'loader_probe'").bind(license.guild_id, deviceHash, license.id),
+    env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ?").bind(license.guild_id, deviceHash, license.id),
     env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE id = ? AND status = 'security_blacklisted'").bind(now(), license.id),
   ]);
   license.status = "active";
@@ -1092,12 +1108,15 @@ async function handleSecurityReport(request, env) {
   const deviceId = cleanText(body?.device_id, 512);
   const reason = cleanText(body?.reason, 32);
   if (!key || !deviceId) return publicJson({ ok: false, error: "Missing key or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy", "hwid_spoof"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!PERSISTENT_SECURITY_REASONS.has(reason) && !NON_PERSISTENT_SECURITY_REASONS.has(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
   const license = await findLicenseByKey(env, key);
   const hash = await hashDevice(env, deviceId);
   // A report may only blacklist the authenticated key's already-bound device.
   // Never accept a caller-supplied target license, user, guild or raw HWID hash.
   if (!license || !license.hwid_hash || license.hwid_hash !== hash) return publicJson({ ok: false, error: "Invalid key or HWID" }, 403);
+  if (NON_PERSISTENT_SECURITY_REASONS.has(reason)) {
+    return publicJson({ ok: true, status: "Session blocked", persistent: false });
+  }
   const timestamp = now();
   await env.DB.batch([
     env.DB.prepare("INSERT OR IGNORE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)").bind(license.guild_id, hash, reason, license.id, timestamp),
@@ -1112,7 +1131,7 @@ async function handleFfaSecurityReport(request, env) {
   const reason = cleanText(body?.reason, 32);
   const token = cleanText(body?.token, 2048);
   if (!deviceId || !token) return publicJson({ ok: false, error: "Missing report proof or HWID" }, 400);
-  if (!["gui", "clipboard", "file", "console", "network", "integrity", "environment", "http_spy", "hwid_spoof"].includes(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
+  if (!PERSISTENT_SECURITY_REASONS.has(reason) && !NON_PERSISTENT_SECURITY_REASONS.has(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
 
   const hash = await hashDevice(env, deviceId);
   const claims = await verifyFfaReportToken(env, token, hash);
@@ -1121,6 +1140,9 @@ async function handleFfaSecurityReport(request, env) {
     .bind(String(claims.s), String(claims.g))
     .first();
   if (!script || !script.enabled || !script.ffa_enabled) return publicJson({ ok: false, error: "FFA access is disabled" }, 403);
+  if (NON_PERSISTENT_SECURITY_REASONS.has(reason)) {
+    return publicJson({ ok: true, status: "Session blocked", persistent: false });
+  }
 
   const timestamp = now();
   await env.DB.batch([
@@ -1592,10 +1614,19 @@ local __ea_source_fragments={}
 local __ea_source_ready=false
 local __ea_scrub_gui=nil
 local __ea_loadstring=loadstring
+local __ea_persistent_reason={
+    gui=true,
+    clipboard=true,
+    file=true,
+    console=true,
+    network=true
+}
 local function __ea_block(reason)
     if __ea_stopped then return "Blacklisted" end
     __ea_stopped=true
+    if __ea_persistent_reason[reason] then
 ${reportAttempt}
+    end
     if type(__ea_scrub_gui)=="function" then pcall(__ea_scrub_gui) end
     K("Blacklisted")
     return "Blacklisted"
@@ -1935,18 +1966,10 @@ local function __ea_watch_spy_root(root)
     pcall(function() for _,obj in ipairs(root:GetDescendants()) do __ea_scan_spy_object(obj) end end)
     pcall(function() root.DescendantAdded:Connect(function(obj) task.defer(__ea_scan_spy_object,obj) end) end)
 end
-pcall(function() if type(gethui)=="function" then __ea_watch_spy_root(gethui()) end end)
-pcall(function() __ea_watch_spy_root(game:GetService("CoreGui")) end)
-pcall(function() if lp then __ea_watch_spy_root(lp:FindFirstChildOfClass("PlayerGui")) end end)
-for _,env in ipairs(__ea_envs()) do
-    pcall(function()
-        for name,value in pairs(env) do
-            if __ea_spy_like(name) and (type(value)=="function" or type(value)=="table") then
-                __ea_block("http_spy") return
-            end
-        end
-    end)
-end
+-- Spy-like names and UI labels are not sufficient evidence on their own.
+-- Many normal executors expose decompile/debug helpers, so startup presence
+-- checks are intentionally non-blocking. Direct source extraction is guarded
+-- by the source-aware sinks and environment wrappers below.
 
 -- Layer 8: high-confidence source-extraction guard. Do not block ordinary
 -- getgenv/getfenv/gethui/debug/hook APIs: protected hubs commonly use those
@@ -1976,7 +1999,9 @@ task.spawn(function()
     while not __ea_stopped and task.wait(2.5) do
         for _,ref in ipairs(__ea_guard_refs) do
             if rawget(ref.env,ref.name)~=ref.expected then
-                __ea_block("integrity") return
+                -- Protected scripts and executors legitimately replace globals.
+                -- Stop integrity monitoring without punishing the HWID/session.
+                return
             end
         end
     end
@@ -2048,10 +2073,8 @@ if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_s
 __ea_hook_score=__ea_hook_score+__ea_http_alias_hook_score()
 __ea_hook_score=__ea_hook_score+__ea_websocket_hook_score()
 
-if __ea_known_logger_file or __ea_hook_score>=3 then
-    K("Security logger detected.")
-    return
-end
+-- Hook scores and pre-existing logger files are heuristics only.
+-- They are deliberately non-blocking to avoid false positives on executors.
 
 local function __ea_hwid_spoofed()
     for _,env in ipairs(__ea_envs()) do
@@ -2068,7 +2091,8 @@ local function __ea_hwid_spoofed()
     end
     return false
 end
-if __ea_hwid_spoofed() then __ea_block("hwid_spoof") return end
+-- RbxGetIdentity/__Identify values vary by executor and are not reliable
+-- enough to punish or block a client automatically.
 
 ${protectedUrl}
 ${protectedHeaders}

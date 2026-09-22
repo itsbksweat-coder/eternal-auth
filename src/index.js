@@ -1343,10 +1343,15 @@ function isBrowserNavigation(request) {
   const mode = (request.headers.get("sec-fetch-mode") || "").toLowerCase();
   const dest = (request.headers.get("sec-fetch-dest") || "").toLowerCase();
   const fetchUser = (request.headers.get("sec-fetch-user") || "").toLowerCase();
-  // Real top-level browser navigations normally carry these Fetch Metadata
-  // headers. We intentionally do not classify on Accept alone because some
-  // executor HTTP clients use broad browser-like Accept headers.
-  return mode === "navigate" || dest === "document" || fetchUser === "?1";
+  const accept = (request.headers.get("accept") || "").toLowerCase();
+  const upgrade = (request.headers.get("upgrade-insecure-requests") || "").trim();
+
+  // Block normal browser/document visits from receiving a .lua response. Some
+  // mobile/in-app browsers omit Fetch Metadata headers, so also recognize the
+  // normal HTML navigation Accept header. Executor requests typically use
+  // */* or application/text-like accepts and continue through the loader path.
+  const wantsHtml = accept.includes("text/html") || accept.includes("application/xhtml+xml");
+  return mode === "navigate" || dest === "document" || fetchUser === "?1" || wantsHtml || upgrade === "1";
 }
 
 function hasLoaderExecutionIntent(request) {

@@ -221,7 +221,9 @@ if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
 if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
 __ea_hook_score=__ea_hook_score+__ea_http_hook_score()+__ea_websocket_hook_score()
-if __ea_known_logger_file or __ea_spy_env_detected() or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
+-- Keep authentication enforcement server-side. Client hook/HWID heuristics can
+-- false-positive on legitimate executors, so they must not block execution.
+if __ea_known_logger_file then stop() return end
 e.script_key=k
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
@@ -260,7 +262,9 @@ if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
 if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
 if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
 __ea_hook_score=__ea_hook_score+__ea_http_hook_score()+__ea_websocket_hook_score()
-if __ea_known_logger_file or __ea_spy_env_detected() or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
+-- Keep authentication enforcement server-side. Client hook/HWID heuristics can
+-- false-positive on legitimate executors, so they must not block execution.
+if __ea_known_logger_file then stop() return end
 local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
 if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
 local f=__ea_loadstring(r.Body or r.body or "")

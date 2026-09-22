@@ -546,7 +546,7 @@ export default {
           headers: {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "GET,POST,OPTIONS",
-            "access-control-allow-headers": "content-type,authorization,x-eternal-device,x-eternal-ticket,x-eternal-execute",
+            "access-control-allow-headers": "content-type,authorization,x-eternal-device,x-eternal-legacy-device,x-eternal-ticket,x-eternal-execute",
             "access-control-max-age": "86400",
           },
         });
@@ -1245,7 +1245,7 @@ async function handleVerify(request, env) {
 
 async function handleProtectedLoader(request, env, ctx) {
   const url = new URL(request.url);
-  const { key, deviceId } = sourceCredentials(request);
+  const { key, deviceId, legacyDeviceId } = sourceCredentials(request);
   const scriptId = cleanText(url.searchParams.get("script_id"), 128);
   const loaderTicket = cleanText(request.headers.get("x-eternal-ticket"), 4096);
 
@@ -1300,8 +1300,10 @@ async function handleProtectedLoader(request, env, ctx) {
     return deniedSource("Invalid key");
   }
 
-  await recoverLegacyLoaderProbe(env, row, deviceHash);
-  if (row.status === "security_blacklisted" || await deviceBlocked(env, row.guild_id, deviceHash, row.hwid_hash)) {
+  await migrateLegacyDeviceBinding(env, row, deviceId, legacyDeviceId);
+  const effectiveDeviceHash = await hashDevice(env, deviceId);
+  await recoverLegacyLoaderProbe(env, row, effectiveDeviceHash);
+  if (row.status === "security_blacklisted" || await deviceBlocked(env, row.guild_id, effectiveDeviceHash, row.hwid_hash)) {
     return blacklistedSource();
   }
   const timestamp = now();
@@ -1336,13 +1338,13 @@ async function handleProtectedLoader(request, env, ctx) {
     return deniedSource();
   }
 
-  if (deviceHash) {
+  if (effectiveDeviceHash) {
     if (!row.hwid_hash) {
       // Only the first device bind requires an awaited write. Normal executions
       // skip this write completely.
-      if (!await bindDevice(env, row, deviceHash, timestamp)) return deniedSource("HWID bind failed");
-      row.hwid_hash = deviceHash;
-    } else if (row.hwid_hash !== deviceHash) {
+      if (!await bindDevice(env, row, effectiveDeviceHash, timestamp)) return deniedSource("HWID bind failed");
+      row.hwid_hash = effectiveDeviceHash;
+    } else if (row.hwid_hash !== effectiveDeviceHash) {
       return deniedSource("HWID mismatch");
     }
   }
@@ -1370,13 +1372,14 @@ async function handleProtectedLoader(request, env, ctx) {
   }
   if (row.panel_id) {
     const assignedPanel = await getPanel(env, row.guild_id, row.panel_id);
-    if (!assignedPanel || assignedPanel.script_id !== script.id) return deniedSource();
+    if (!assignedPanel) return deniedSource("Assigned panel is unavailable");
+    if (assignedPanel.script_id !== script.id) return deniedSource("Key is assigned to a different script");
   }
 
   if (!await verifyLoaderTicket(env, request, loaderTicket, {
     licenseId: row.id,
     scriptId: script.id,
-    deviceHash,
+    deviceHash: effectiveDeviceHash,
     ffa: false,
   })) return deniedSource("Loader ticket invalid or expired");
 
@@ -1487,7 +1490,14 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     });
   }
   const license = await findLicenseByKey(env, credentials.key);
-  if (!license) return deniedSource();
+  if (!license) return deniedSource("Invalid key");
+
+  await migrateLegacyDeviceBinding(
+    env,
+    license,
+    credentials.deviceId,
+    credentials.legacyDeviceId,
+  );
 
   let script = await env.DB.prepare("SELECT * FROM scripts WHERE loader_id = ? LIMIT 1")
     .bind(loaderId)
@@ -1509,7 +1519,12 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     }
   }
 
-  if (!guild || !script || !guild.active || !script.enabled || !script.content || license.guild_id !== guild.guild_id) return deniedSource();
+  if (!guild) return deniedSource("Project not found");
+  if (!script) return deniedSource("Script not found");
+  if (!guild.active) return deniedSource("Project disabled");
+  if (!script.enabled) return deniedSource("Script disabled");
+  if (!script.content) return deniedSource("Script source is empty");
+  if (license.guild_id !== guild.guild_id) return deniedSource("Key belongs to a different project");
   if (license.panel_id) {
     const assignedPanel = await getPanel(env, guild.guild_id, license.panel_id);
     if (!assignedPanel || assignedPanel.script_id !== script.id) return deniedSource();
@@ -1625,7 +1640,37 @@ function sourceCredentials(request) {
   return {
     key: cleanText(bearer?.[1] || url.searchParams.get("key"), 256),
     deviceId: cleanText(request.headers.get("x-eternal-device") || url.searchParams.get("device_id"), 512),
+    legacyDeviceId: cleanText(request.headers.get("x-eternal-legacy-device"), 512),
   };
+}
+
+async function migrateLegacyDeviceBinding(env, license, deviceId, legacyDeviceId) {
+  if (!license?.id || !license.hwid_hash || !deviceId || !legacyDeviceId) return false;
+  if (String(deviceId) === String(legacyDeviceId)) return false;
+
+  const [currentHash, legacyHash] = await Promise.all([
+    hashDevice(env, deviceId),
+    hashDevice(env, legacyDeviceId),
+  ]);
+  if (license.hwid_hash !== legacyHash || currentHash === legacyHash) return false;
+
+  const result = await env.DB.prepare(
+    "UPDATE licenses SET hwid_hash = ?, updated_at = ? WHERE id = ? AND hwid_hash = ?"
+  ).bind(currentHash, now(), license.id, legacyHash).run();
+
+  if (result?.meta?.changes) {
+    license.hwid_hash = currentHash;
+    return true;
+  }
+
+  const refreshed = await env.DB.prepare("SELECT hwid_hash FROM licenses WHERE id = ? LIMIT 1")
+    .bind(license.id)
+    .first();
+  if (refreshed?.hwid_hash === currentHash) {
+    license.hwid_hash = currentHash;
+    return true;
+  }
+  return false;
 }
 
 
@@ -1636,8 +1681,8 @@ function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = ""
     : `local key=e.script_key or script_key
 if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to access this script. No key found.") return end`;
   const protectedHeaders = ffa
-    ? `local headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`
-    : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`;
+    ? `local headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`
+    : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`;
 
   return `-- Eternal Auth protected bootstrap
 local H=game:GetService("HttpService")
@@ -1650,22 +1695,26 @@ end
 local e=(getgenv and getgenv()) or _G
 ${keySetup}
 
-local d
+local legacyDevice
 pcall(function()
-    if type(gethwid)=="function" then d=gethwid() end
+    if type(gethwid)=="function" then
+        local value=gethwid()
+        if value and tostring(value)~="" then legacyDevice=tostring(value) end
+    end
 end)
-if not d or tostring(d)=="" then
-    if readfile and writefile then
-        local file="eternal_auth_device.txt"
-        local ok,value=pcall(readfile,file)
-        if ok and value and value~="" then
-            d=value
-        else
-            d=H:GenerateGUID(false)
-            pcall(writefile,file,d)
-        end
+
+local d
+if readfile and writefile then
+    local file="eternal_auth_device.txt"
+    local ok,value=pcall(readfile,file)
+    if ok and value and tostring(value)~="" then
+        d=tostring(value)
+    else
+        d=H:GenerateGUID(false)
+        pcall(writefile,file,d)
     end
 end
+if not d or tostring(d)=="" then d=legacyDevice end
 if not d or tostring(d)=="" then K("Missing HWID") return end
 
 local req=request or http_request or (syn and syn.request) or (http and http.request)

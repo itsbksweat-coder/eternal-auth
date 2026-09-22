@@ -456,6 +456,26 @@ export default {
     try {
       const url = new URL(request.url);
 
+      // Loader/source endpoints are execution-only. A normal browser navigation
+      // gets an empty 404 instead of a page or source response, while executor
+      // HTTP requests continue through the normal loader handshake.
+      if (
+        isBrowserNavigation(request) &&
+        (
+          url.pathname === "/api/v1/bootstrap" ||
+          url.pathname.startsWith("/files/v4/loaders/") ||
+          url.pathname.startsWith("/files/v4/ffa/")
+        )
+      ) {
+        return new Response(null, {
+          status: 404,
+          headers: {
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+
       if (request.method === "OPTIONS" && url.pathname.startsWith("/api/v1/")) {
         return new Response(null, {
           status: 204,

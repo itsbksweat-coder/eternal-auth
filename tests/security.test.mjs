@@ -117,6 +117,20 @@ test('authenticated exposure report bans bound device, rejects other devices and
   response = await secureProtectedResponse(env,{key:'second-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 403);
 });
+test('heuristic security reports never create persistent HWID bans', async () => {
+  const {db,env}=await fixture();
+  let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
+  assert.equal(response.status,200);
+  for (const reason of ['integrity','environment','http_spy','hwid_spoof']) {
+    response=await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}),env);
+    assert.equal(response.status,200,reason);
+    const body=await response.json();
+    assert.equal(body.persistent,false,reason);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0,reason);
+    assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'active',reason);
+  }
+});
+
 test('concurrent first binds only release code to the winning device', async () => {
   const { env } = await fixture();
   const responses = await Promise.all(['a','b'].map(deviceId => secureProtectedResponse(env,{key:'valid-key',deviceId,scriptId:'s'})));
@@ -186,23 +200,26 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(response.status,200);
   const source=await response.text();
   assert.match(source,/X-Eternal-Execute/);
-  assert.ok(source.includes(String.raw`gsub("\\","/")`), 'first-stage launcher must contain a valid Lua backslash literal');
-  assert.ok(!source.includes(String.raw`gsub("\","/")`), 'first-stage launcher must not contain the invalid one-backslash Lua literal');
+  assert.match(source,/Eternal Auth loader compile error/);
+  assert.doesNotMatch(source,/__ea_hook_score|__ea_hwid_spoofed|__ea_spy_env_detected/);
   assert.doesNotMatch(source,/SECRET_PROTECTED_CONTENT/);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 });
 
-test('legacy loader_probe false-positive HWID bans self-recover but real security bans do not', async () => {
+test('heuristic HWID bans self-recover but real source-leak bans do not', async () => {
   const {db,env}=await fixture();
   const hash=await api.hashDevice(env,'legacy-device');
-  db.prepare("UPDATE licenses SET hwid_hash=?,status='security_blacklisted' WHERE id='l'").run(hash);
-  db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'loader_probe','l',0)").run(hash);
-  let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
-  assert.equal(response.status,200);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
+  for (const reason of ['loader_probe','integrity','environment','http_spy','hwid_spoof']) {
+    db.prepare("DELETE FROM hwid_blacklists").run();
+    db.prepare("UPDATE licenses SET hwid_hash=?,status='security_blacklisted' WHERE id='l'").run(hash);
+    db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,?, 'l',0)").run(hash,reason);
+    const response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
+    assert.equal(response.status,200, reason);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0, reason);
+  }
   db.prepare("UPDATE licenses SET status='security_blacklisted' WHERE id='l'").run();
   db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,'clipboard','l',0)").run(hash);
-  response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
+  const response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
   assert.equal(response.status,403);
 });
 
@@ -265,13 +282,13 @@ test('FFA signed reports blacklist only the reporting device', async () => {
   const {db,env}=await fixture();
   const deviceHash=await api.hashDevice(env,'ffa-device');
   const token=await api.createFfaReportToken(env,'123456789012345678','s',deviceHash);
-  let response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'other-device',reason:'environment',token})}),env);
+  let response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'other-device',reason:'gui',token})}),env);
   assert.equal(response.status,403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
-  response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'ffa-device',reason:'environment',token})}),env);
+  response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'ffa-device',reason:'gui',token})}),env);
   assert.equal(response.status,200);
   assert.equal((await response.json()).status,'Blacklisted');
-  assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'environment');
+  assert.equal(db.prepare('SELECT reason FROM hwid_blacklists').get().reason,'gui');
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,403);
   assert.equal(await response.text(),'Blacklisted');

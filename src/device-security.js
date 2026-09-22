@@ -4,6 +4,11 @@ const NON_PERSISTENT_SECURITY_REASONS = [
   'environment',
   'http_spy',
   'hwid_spoof',
+  'gui',
+  'clipboard',
+  'file',
+  'console',
+  'network',
 ];
 
 export async function deviceBlocked(env, guildId, ...hashes) {

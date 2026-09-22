@@ -17,13 +17,14 @@ const PERSISTENT_SECURITY_REASONS = new Set([
   "file",
   "console",
   "network",
-  "http_spy",
+  "clipboard_source",
 ]);
 
 const NON_PERSISTENT_SECURITY_REASONS = new Set([
   "loader_probe",
   "integrity",
   "environment",
+  "http_spy",
   "hwid_spoof",
 ]);
 
@@ -520,14 +521,13 @@ export default {
     try {
       const url = new URL(request.url);
 
-      // Only hide verification/source endpoints from normal browser visits.
-      // The website and every other route keep their original behavior.
+      // Hide Eternal Auth source/auth pages only when they are opened as a
+      // real browser document. Executor HTTP requests keep their normal behavior.
       if (
         isBrowserNavigation(request) &&
         (
-          url.pathname === "/api/v1/bootstrap" ||
-          url.pathname.startsWith("/files/v4/loaders/") ||
-          url.pathname.startsWith("/files/v4/ffa/")
+          url.pathname.startsWith("/api/v1/") ||
+          url.pathname.startsWith("/files/v4/")
         )
       ) {
         return new Response("", {
@@ -1187,11 +1187,11 @@ async function handleSecurityReport(request, env) {
   const hash = await hashDevice(env, deviceId);
   if (!license || !license.hwid_hash || license.hwid_hash !== hash) return publicJson({ ok: false, error: "Invalid key or HWID" }, 403);
 
-  if (reason === "http_spy") {
+  if (reason === "clipboard_source") {
     const timestamp = now();
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'http_spy_confirmed', ?, ?)"
+        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'clipboard_source_confirmed', ?, ?)"
       ).bind(license.guild_id, hash, license.id, timestamp),
       env.DB.prepare(
         "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)"
@@ -1220,11 +1220,11 @@ async function handleFfaSecurityReport(request, env) {
     .first();
   if (!script || !script.enabled || !script.ffa_enabled) return publicJson({ ok: false, error: "FFA access is disabled" }, 403);
 
-  if (reason === "http_spy") {
+  if (reason === "clipboard_source") {
     const timestamp = now();
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'http_spy_confirmed', ?, ?)"
+        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'clipboard_source_confirmed', ?, ?)"
       ).bind(script.guild_id, hash, `ffa:${script.id}`, timestamp),
       env.DB.prepare(
         "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND hwid_hash = ?"
@@ -1790,30 +1790,31 @@ async function migrateLegacyDeviceBinding(env, license, deviceId, legacyDeviceId
 
 function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "", loaderTicket = "") {
   const apiUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa-loader" : "loader"}?script_id=${encodeURIComponent(scriptId)}`;
+  const securityReportUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`;
   const keySetup = ffa
     ? `local key="FFA"`
     : `local key=e.script_key or script_key
 if not key or key=="" or tostring(key)=="KEY" then K("You need a script_key to access this script. No key found.") return end`;
-  const securityReportUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`;
+
   const reportLua = ffa
     ? `local __ea_report_token=${JSON.stringify(ffaReportToken)}
-local function __ea_report_http_spy()
+local function __ea_report_clipboard_source()
     pcall(function()
         req({
             Url=${JSON.stringify(securityReportUrl)},
             Method="POST",
             Headers={["content-type"]="application/json"},
-            Body=H:JSONEncode({device_id=tostring(d),reason="http_spy",token=__ea_report_token})
+            Body=H:JSONEncode({device_id=tostring(d),reason="clipboard_source",token=__ea_report_token})
         })
     end)
 end`
-    : `local function __ea_report_http_spy()
+    : `local function __ea_report_clipboard_source()
     pcall(function()
         req({
             Url=${JSON.stringify(securityReportUrl)},
             Method="POST",
             Headers={["content-type"]="application/json"},
-            Body=H:JSONEncode({key=tostring(key),device_id=tostring(d),reason="http_spy"})
+            Body=H:JSONEncode({key=tostring(key),device_id=tostring(d),reason="clipboard_source"})
         })
     end)
 end`;
@@ -1862,97 +1863,60 @@ local u=${JSON.stringify(apiUrl)}
 ${protectedHeaders}
 ${reportLua}
 
--- Temporary HTTP-spy/logger guard. It only exists while Eternal Auth performs
--- the protected request, then every wrapped sink is restored before user code runs.
-local __ea_spy=false
-local __ea_restore={}
-local function __ea_has_url_scheme(value)
-    local text=string.lower(tostring(value or ""))
-    if string.find(text,"www.",1,true) then return true end
-    return string.match(text,"[%a][%w+%.%-]*://")~=nil
-end
-local function __ea_mark_http_spy()
-    if __ea_spy then return end
-    __ea_spy=true
-    __ea_report_http_spy()
-end
-local function __ea_scan_values(...)
-    local values={...}
-    for i=1,#values do
-        local value=values[i]
-        if typeof(value)=="string" and __ea_has_url_scheme(value) then
-            __ea_mark_http_spy()
-            return
-        elseif typeof(value)=="table" then
-            pcall(function()
-                for k,v in pairs(value) do
-                    if __ea_has_url_scheme(k) or __ea_has_url_scheme(v) then
-                        __ea_mark_http_spy()
-                        return
-                    end
-                end
-            end)
-            if __ea_spy then return end
-        end
-    end
-end
-local function __ea_wrap_sink(env,name)
-    local original=rawget(env,name)
-    if type(original)~="function" then return end
-    local wrapped=function(...)
-        __ea_scan_values(...)
-        return original(...)
-    end
-    local ok=pcall(function() env[name]=wrapped end)
-    if ok then
-        table.insert(__ea_restore,function() pcall(function() env[name]=original end) end)
-    end
-end
-local __ea_envs={_G,e}
-for _,env in ipairs(__ea_envs) do
-    if type(env)=="table" then
-        for _,name in ipairs({
-            "print","warn","rconsoleprint","rconsolewarn","rconsoleerr",
-            "setclipboard","toclipboard","writeclipboard",
-            "writefile","appendfile"
-        }) do
-            __ea_wrap_sink(env,name)
-        end
-    end
+-- Source-aware clipboard protection. Normal clipboard writes are untouched.
+-- Only copying the actual protected source (or a substantial chunk of it)
+-- creates a permanent HWID blacklist and replaces the clipboard contents.
+local __ea_source=nil
+local __ea_pending_clipboard={}
+local __ea_clipboard_blacklisted=false
+
+local function __ea_is_source_copy(value)
+    if not __ea_source then return false end
+    local candidate=tostring(value or "")
+    local source=tostring(__ea_source or "")
+    if candidate=="" or source=="" then return false end
+    if candidate==source then return true end
+    if #candidate>=128 and string.find(source,candidate,1,true) then return true end
+    if #source>=128 and string.find(candidate,source,1,true) then return true end
+    return false
 end
 
-local __ea_connections={}
-local function __ea_watch_text_root(root)
-    if not root then return end
-    local function watch(obj)
-        if not obj then return end
-        if obj:IsA("TextLabel") or obj:IsA("TextBox") or obj:IsA("TextButton") then
-            pcall(function()
-                if __ea_has_url_scheme(obj.Text) then __ea_mark_http_spy() end
-                local c=obj:GetPropertyChangedSignal("Text"):Connect(function()
-                    if __ea_has_url_scheme(obj.Text) then __ea_mark_http_spy() end
-                end)
-                table.insert(__ea_connections,c)
-            end)
+local function __ea_blacklist_clipboard(original)
+    if __ea_clipboard_blacklisted then return end
+    __ea_clipboard_blacklisted=true
+    __ea_report_clipboard_source()
+    pcall(function() original("Blacklisted") end)
+    K("Blacklisted")
+end
+
+local function __ea_wrap_clipboard(env,name)
+    local original=rawget(env,name)
+    if type(original)~="function" then return end
+    local wrapped=function(value,...)
+        local text=tostring(value or "")
+        if __ea_source then
+            if __ea_is_source_copy(text) then
+                __ea_blacklist_clipboard(original)
+                return nil
+            end
+        elseif #__ea_pending_clipboard<12 then
+            table.insert(__ea_pending_clipboard,{fn=original,value=text})
+        end
+        return original(value,...)
+    end
+    pcall(function() env[name]=wrapped end)
+end
+
+for _,env in ipairs({_G,e}) do
+    if type(env)=="table" then
+        for _,name in ipairs({"setclipboard","toclipboard","writeclipboard"}) do
+            __ea_wrap_clipboard(env,name)
         end
     end
-    pcall(function()
-        for _,obj in ipairs(root:GetDescendants()) do watch(obj) end
-        table.insert(__ea_connections,root.DescendantAdded:Connect(watch))
-    end)
 end
-pcall(function() if type(gethui)=="function" then __ea_watch_text_root(gethui()) end end)
-pcall(function() __ea_watch_text_root(game:GetService("CoreGui")) end)
 
 local ok,result=pcall(req,{Url=u,Method="POST",Headers=headers})
 if not ok or not result then K("Eternal Auth connection failed.") return end
-
-for _,restore in ipairs(__ea_restore) do pcall(restore) end
-for _,connection in ipairs(__ea_connections) do pcall(function() connection:Disconnect() end) end
-if __ea_spy then
-    K("Blacklisted")
-    return
-end
 
 local status=tonumber(result.StatusCode or result.status_code or result.Status or 0)
 local body=result.Body or result.body or ""
@@ -1966,6 +1930,15 @@ if status~=200 then
     end
     return
 end
+
+__ea_source=tostring(body or "")
+for _,pending in ipairs(__ea_pending_clipboard) do
+    if __ea_is_source_copy(pending.value) then
+        __ea_blacklist_clipboard(pending.fn)
+        return
+    end
+end
+__ea_pending_clipboard={}
 
 if type(loadstring)~="function" then
     K("This executor does not support loadstring.")

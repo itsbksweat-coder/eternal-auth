@@ -196,6 +196,7 @@ __ea_disable_clipboard()
 }
 
 export function authenticatedLauncher(url, key = null) {
+  const reportUrl = new URL("/api/v1/security/report", url).toString();
   return `${key === null ? '-- Set script_key to your license key before running.' : 'script_key=' + JSON.stringify(key)}
 local e=(getgenv and getgenv()) or _G
 local k=script_key or e.script_key
@@ -214,8 +215,6 @@ pcall(function()
     end
 end)
 
--- Prefer Eternal Auth's own persisted device id. Some mobile executors expose
--- a gethwid() value that changes between launches.
 local d
 if readfile and writefile then
     local ok,v=pcall(readfile,"eternal_auth_device.txt")
@@ -228,9 +227,71 @@ if readfile and writefile then
 end
 if not d or tostring(d)=="" then d=legacyDevice end
 if not d or tostring(d)=="" then stop("Missing HWID") return end
+
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if type(req)~="function" then stop("HTTP request unavailable") return end
 e.script_key=k
+
+local __ea_source=nil
+local __ea_pending_clipboard={}
+local __ea_clipboard_blacklisted=false
+
+local function __ea_report_clipboard_source()
+    pcall(function()
+        req({
+            Url=${JSON.stringify(reportUrl)},
+            Method="POST",
+            Headers={["content-type"]="application/json"},
+            Body=h:JSONEncode({key=tostring(k),device_id=tostring(d),reason="clipboard_source"})
+        })
+    end)
+end
+
+local function __ea_is_source_copy(value)
+    if not __ea_source then return false end
+    local candidate=tostring(value or "")
+    local source=tostring(__ea_source or "")
+    if candidate=="" or source=="" then return false end
+    if candidate==source then return true end
+    if #candidate>=128 and string.find(source,candidate,1,true) then return true end
+    if #source>=128 and string.find(candidate,source,1,true) then return true end
+    return false
+end
+
+local function __ea_blacklist_clipboard(original)
+    if __ea_clipboard_blacklisted then return end
+    __ea_clipboard_blacklisted=true
+    __ea_report_clipboard_source()
+    pcall(function() original("Blacklisted") end)
+    stop("Blacklisted")
+end
+
+local function __ea_wrap_clipboard(env,name)
+    local original=rawget(env,name)
+    if type(original)~="function" then return end
+    local wrapped=function(value,...)
+        local text=tostring(value or "")
+        if __ea_source then
+            if __ea_is_source_copy(text) then
+                __ea_blacklist_clipboard(original)
+                return nil
+            end
+        elseif #__ea_pending_clipboard<12 then
+            table.insert(__ea_pending_clipboard,{fn=original,value=text})
+        end
+        return original(value,...)
+    end
+    pcall(function() env[name]=wrapped end)
+end
+
+for _,env in ipairs({_G,e}) do
+    if type(env)=="table" then
+        for _,name in ipairs({"setclipboard","toclipboard","writeclipboard"}) do
+            __ea_wrap_clipboard(env,name)
+        end
+    end
+end
+
 local ok,r=pcall(req,{
     Url=${JSON.stringify(url)},
     Method="GET",
@@ -254,6 +315,16 @@ if code~=200 then
     end
     return
 end
+
+__ea_source=tostring(body or "")
+for _,pending in ipairs(__ea_pending_clipboard) do
+    if __ea_is_source_copy(pending.value) then
+        __ea_blacklist_clipboard(pending.fn)
+        return
+    end
+end
+__ea_pending_clipboard={}
+
 if type(loadstring)~="function" then stop("loadstring unavailable") return end
 local fn,err=loadstring(body)
 pcall(function() r.Body="" r.body="" end)
@@ -261,6 +332,7 @@ body=nil
 if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
 fn()`;
 }
+
 export function ffaLauncher(url) {
   return `-- Eternal Auth FFA loader (no key required)
 local h=game:GetService("HttpService")

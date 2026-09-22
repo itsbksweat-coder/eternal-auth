@@ -2595,6 +2595,59 @@ function discordModal(customId, title, label, placeholder = "") {
   });
 }
 
+async function updateDeferredDiscordResponse(interaction, response) {
+  const applicationId = cleanText(interaction?.application_id, 64);
+  const token = cleanText(interaction?.token, 256);
+  if (!applicationId || !token) return false;
+
+  let data = null;
+  try {
+    const payload = await response.clone().json();
+    if (payload?.type === 4 || payload?.type === 7) data = payload.data || {};
+    else if (payload?.type === 9) {
+      data = {
+        content: "This action needs to open a Discord modal. Please run it again.",
+        allowed_mentions: { parse: [] },
+      };
+    }
+  } catch {}
+
+  if (!data) {
+    data = {
+      content: response?.ok === false
+        ? "Eternal Auth could not complete that command."
+        : "Eternal Auth finished the command.",
+      allowed_mentions: { parse: [] },
+    };
+  }
+
+  // Ephemeral state is fixed by the initial defer and cannot be changed here.
+  if (data && typeof data === "object") {
+    delete data.flags;
+    if (!data.allowed_mentions) data.allowed_mentions = { parse: [] };
+  }
+
+  const result = await fetch(
+    `https://discord.com/api/v10/webhooks/${encodeURIComponent(applicationId)}/${encodeURIComponent(token)}/messages/@original`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    },
+  );
+  if (!result.ok) {
+    console.error("Discord deferred response update failed", result.status, await result.text().catch(() => ""));
+  }
+  return result.ok;
+}
+
+function deferredDiscordMessage() {
+  return json({
+    type: 5,
+    data: { flags: EPHEMERAL },
+  });
+}
+
 function interactionUserId(interaction) {
   return interaction.member?.user?.id || interaction.user?.id || null;
 }
@@ -2639,11 +2692,62 @@ function guildForPanel(guild, panel) {
   };
 }
 
-async function handleDiscordInteraction(request, env, ctx) {
-  const interaction = await verifyDiscordRequest(request, env);
+async function handleDiscordInteraction(request, env, ctx, verifiedInteraction = null, background = false) {
+  const interaction = verifiedInteraction || await verifyDiscordRequest(request, env);
   if (!interaction) return new Response("Invalid request signature", { status: 401 });
 
-  await ensureBackendPersistenceSchema(env);
+  // Discord only allows a few seconds for the initial interaction response.
+  // Ping and autocomplete stay synchronous; normal commands are acknowledged
+  // immediately and completed through the interaction webhook in waitUntil().
+  if (!background) {
+    if (interaction.type === 1) return json({ type: 1 });
+
+    if (interaction.type === 3) {
+      const customId = String(interaction.data?.custom_id || "");
+      const parts = customId.split(":");
+      const action = parts[1] || "";
+      const panelId = parts[2] || null;
+
+      // A modal must be the initial interaction response; it cannot be opened
+      // after a defer. Redeem does not need a database lookup.
+      if (action === "redeem") {
+        return discordModal(
+          `eternal:redeem_modal${panelId ? `:${panelId}` : ""}`,
+          "Redeem Eternal Auth Key",
+          "Redeem code",
+          "ETERNAL-...",
+        );
+      }
+
+      // setpanel_project also opens a modal. Keep that path synchronous, but
+      // skip the expensive schema bootstrap below.
+      if (action !== "setpanel_project") {
+        ctx.waitUntil((async () => {
+          try {
+            const response = await handleDiscordInteraction(request, env, ctx, interaction, true);
+            await updateDeferredDiscordResponse(interaction, response);
+          } catch (error) {
+            console.error("Deferred Discord component failed", error);
+            await updateDeferredDiscordResponse(interaction, discordMessage("Eternal Auth could not complete that action."));
+          }
+        })());
+        return deferredDiscordMessage();
+      }
+    }
+
+    if (interaction.type === 2 || interaction.type === 5) {
+      ctx.waitUntil((async () => {
+        try {
+          const response = await handleDiscordInteraction(request, env, ctx, interaction, true);
+          await updateDeferredDiscordResponse(interaction, response);
+        } catch (error) {
+          console.error("Deferred Discord interaction failed", error);
+          await updateDeferredDiscordResponse(interaction, discordMessage("Eternal Auth could not complete that command."));
+        }
+      })());
+      return deferredDiscordMessage();
+    }
+  }
 
   if (interaction.type === 1) return json({ type: 1 });
 
@@ -2659,6 +2763,19 @@ async function handleDiscordInteraction(request, env, ctx) {
       .slice(0, 25)
       .map((panel) => ({ name: String(panel.name || "Eternal Auth Panel").slice(0, 100), value: String(panel.id) }));
     return json({ type: 8, data: { choices } });
+  }
+
+  const fastModalAction = interaction.type === 3
+    ? String(interaction.data?.custom_id || "").split(":")[1] || ""
+    : "";
+  if (fastModalAction !== "setpanel_project") {
+    await ensureBackendPersistenceSchema(env);
+  } else {
+    // Schema is already provisioned in deployed environments; don't put DDL
+    // on the critical path for a modal that must be returned immediately.
+    ctx.waitUntil(ensureBackendPersistenceSchema(env).catch((error) => {
+      console.error("Background schema ensure failed", error);
+    }));
   }
 
   if (interaction.type === 3) {

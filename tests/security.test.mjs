@@ -208,7 +208,14 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/X-Eternal-Execute/);
   assert.match(lua,/loadstring\(body\)/);
   assert.match(lua,/body=nil/);
-  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|hookfunction|hookmetamethod/);
+  assert.match(lua,/hookfunction/);
+  assert.match(lua,/getrenv/);
+  assert.match(lua,/getfenv\(0\)/);
+  assert.match(lua,/set_clipboard/);
+  assert.match(lua,/copyclipboard/);
+  assert.match(lua,/clipboardset/);
+  assert.match(lua,/setrbxclipboard/);
+  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|hookmetamethod/);
   assert.doesNotMatch(lua,/\$\{/);
 });
 
@@ -320,6 +327,13 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   const source=await response.text();
   assert.match(source,/X-Eternal-Execute/);
   assert.match(source,/Eternal Auth loader compile error/);
+  assert.match(source,/reason="clipboard_source"/);
+  assert.match(source,/hookfunction/);
+  assert.match(source,/getrenv/);
+  assert.match(source,/getfenv\(0\)/);
+  assert.match(source,/setclipboard/);
+  assert.match(source,/set_clipboard/);
+  assert.match(source,/copyclipboard/);
   assert.doesNotMatch(source,/__ea_hook_score|__ea_hwid_spoofed|__ea_spy_env_detected/);
   assert.doesNotMatch(source,/SECRET_PROTECTED_CONTENT/);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);

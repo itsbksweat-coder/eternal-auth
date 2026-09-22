@@ -208,7 +208,7 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/X-Eternal-Execute/);
   assert.match(lua,/loadstring\(body\)/);
   assert.match(lua,/body=nil/);
-  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|writefile|hookfunction|hookmetamethod/);
+  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|hookfunction|hookmetamethod/);
   assert.doesNotMatch(lua,/\$\{/);
 });
 

@@ -1060,14 +1060,23 @@ async function recoverLegacyLoaderProbe(env, license, deviceHash) {
   ];
   const row = await env.DB.prepare(
     `SELECT reason FROM hwid_blacklists
-      WHERE guild_id = ? AND hwid_hash = ? AND license_id = ?
+      WHERE guild_id = ? AND hwid_hash = ?
         AND reason IN (${autoReasons.map(() => "?").join(",")})
       LIMIT 1`
-  ).bind(license.guild_id, deviceHash, license.id, ...autoReasons).first();
-  if (!row) return false;
+  ).bind(license.guild_id, deviceHash, ...autoReasons).first();
+
+  const autoBlockedStatus = license.status === "security_blacklisted";
+  if (!row && !autoBlockedStatus) return false;
+
   await env.DB.batch([
-    env.DB.prepare("DELETE FROM hwid_blacklists WHERE guild_id = ? AND hwid_hash = ? AND license_id = ?").bind(license.guild_id, deviceHash, license.id),
-    env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE id = ? AND status = 'security_blacklisted'").bind(now(), license.id),
+    env.DB.prepare(
+      `DELETE FROM hwid_blacklists
+        WHERE guild_id = ? AND hwid_hash = ?
+          AND reason IN (${autoReasons.map(() => "?").join(",")})`
+    ).bind(license.guild_id, deviceHash, ...autoReasons),
+    env.DB.prepare(
+      "UPDATE licenses SET status = 'active', updated_at = ? WHERE guild_id = ? AND hwid_hash = ? AND status = 'security_blacklisted'"
+    ).bind(now(), license.guild_id, deviceHash),
   ]);
   license.status = "active";
   return true;
@@ -1078,7 +1087,14 @@ async function validateLicense(env, license, deviceId = null, shouldBindDevice =
 
   const requestedDeviceHash = deviceId ? await hashDevice(env, deviceId) : null;
   await recoverLegacyLoaderProbe(env, license, requestedDeviceHash);
-  if (license.status === "security_blacklisted" || await deviceBlocked(env, license.guild_id, license.hwid_hash, requestedDeviceHash)) return { ok: false, error: "Blacklisted" };
+  const stillDeviceBlocked = await deviceBlocked(env, license.guild_id, license.hwid_hash, requestedDeviceHash);
+  if (license.status === "security_blacklisted" && requestedDeviceHash && !stillDeviceBlocked) {
+    await env.DB.prepare("UPDATE licenses SET status = 'active', updated_at = ? WHERE id = ? AND status = 'security_blacklisted'")
+      .bind(now(), license.id)
+      .run();
+    license.status = "active";
+  }
+  if (license.status === "security_blacklisted" || stillDeviceBlocked) return { ok: false, error: "Blacklisted" };
 
   const blocked = await isBlacklisted(env, license.guild_id, license.discord_id);
   if (blocked) return { ok: false, error: "License is blacklisted", reason: blocked.reason || null };

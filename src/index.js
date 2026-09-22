@@ -1191,7 +1191,7 @@ async function handleSecurityReport(request, env) {
     const timestamp = now();
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'http_spy', ?, ?)"
+        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'http_spy_confirmed', ?, ?)"
       ).bind(license.guild_id, hash, license.id, timestamp),
       env.DB.prepare(
         "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)"
@@ -1224,7 +1224,7 @@ async function handleFfaSecurityReport(request, env) {
     const timestamp = now();
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'http_spy', ?, ?)"
+        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'http_spy_confirmed', ?, ?)"
       ).bind(script.guild_id, hash, `ffa:${script.id}`, timestamp),
       env.DB.prepare(
         "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND hwid_hash = ?"
@@ -1943,7 +1943,6 @@ local function __ea_watch_text_root(root)
 end
 pcall(function() if type(gethui)=="function" then __ea_watch_text_root(gethui()) end end)
 pcall(function() __ea_watch_text_root(game:GetService("CoreGui")) end)
-pcall(function() if lp then __ea_watch_text_root(lp:FindFirstChildOfClass("PlayerGui")) end end)
 
 local ok,result=pcall(req,{Url=u,Method="POST",Headers=headers})
 if not ok or not result then K("Eternal Auth connection failed.") return end

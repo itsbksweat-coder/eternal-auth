@@ -161,11 +161,10 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.equal(response.status,200);
   const bootstrap=await response.text();
   assert.match(bootstrap,/api\/v1\/ffa-loader/);
-  assert.match(bootstrap,/api\/v1\/ffa\/security\/report/);
-  assert.match(bootstrap,/environment/);
-  assert.match(bootstrap,/http_spy/);
-  assert.match(bootstrap,/http logger/);
-  assert.match(bootstrap,/hookmetamethod/);
+  assert.match(bootstrap,/X-Eternal-Ticket/);
+  assert.match(bootstrap,/X-Eternal-Execute/);
+  assert.match(bootstrap,/loadstring\(body\)/);
+  assert.doesNotMatch(bootstrap,/api\/v1\/ffa\/security\/report|__ea_block|http_spy|hookmetamethod/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
   assert.equal(response.status,200);

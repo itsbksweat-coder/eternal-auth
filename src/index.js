@@ -558,19 +558,10 @@ export default {
         }
       }
 
-      // Eternal Auth is API/loader-only. Do not serve public HTML/static pages.
-      // Keeping the fallback independent of ASSETS also prevents a missing or
-      // unavailable static-assets binding from turning ordinary site visits
-      // into a Worker 500.
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store",
-          "x-content-type-options": "nosniff",
-          "x-frame-options": "DENY",
-        },
-      });
+      // Serve the normal Eternal Auth website/admin UI for ordinary browser
+      // routes. Loader/source routes are blocked from browser navigation above.
+      const assetResponse = await env.ASSETS.fetch(request);
+      return withSecurityHeaders(assetResponse);
     } catch (error) {
       console.error(error);
       return json({ ok: false, error: "Internal server error" }, 500);

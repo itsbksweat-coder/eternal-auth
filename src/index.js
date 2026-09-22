@@ -593,12 +593,12 @@ export default {
       }
 
       if (url.pathname === "/api/admin/login" && request.method === "POST") {
-        await ensureBackendPersistenceSchema(env);
+        await ensureAdminAuthSchema(env);
         return handleAdminLogin(request, env);
       }
 
       if (url.pathname === "/api/admin/logout" && request.method === "POST") {
-        await ensureBackendPersistenceSchema(env);
+        await ensureAdminAuthSchema(env);
         return handleAdminLogout(request, env);
       }
 
@@ -766,8 +766,7 @@ async function createLoaderTicket(env, request, { licenseId, scriptId, deviceHas
     l: String(licenseId || ""),
     s: String(scriptId || ""),
     d: String(deviceHash || ""),
-    e: now() + 20,
-    i: await loaderClientFingerprint(request),
+    e: now() + 60,
     n: bytesToBase64Url(crypto.getRandomValues(new Uint8Array(12))),
     f: ffa ? 1 : 0,
   };
@@ -796,7 +795,6 @@ async function verifyLoaderTicket(env, request, token, expected) {
   if (String(claims.s || "") !== String(expected.scriptId || "")) return false;
   if (String(claims.d || "") !== String(expected.deviceHash || "")) return false;
   if (Number(claims.f || 0) !== (expected.ffa ? 1 : 0)) return false;
-  if (String(claims.i || "") !== await loaderClientFingerprint(request)) return false;
 
   // Best-effort replay resistance across requests handled by the same Worker
   // isolate. The signed ticket is already short-lived and client-bound; this
@@ -1251,13 +1249,11 @@ async function handleProtectedLoader(request, env, ctx) {
   const scriptId = cleanText(url.searchParams.get("script_id"), 128);
   const loaderTicket = cleanText(request.headers.get("x-eternal-ticket"), 4096);
 
-  if (!hasLoaderExecutionIntent(request) || !loaderTicket) return deniedSource();
+  if (!hasLoaderExecutionIntent(request)) return deniedSource("Execution request missing");
+  if (!loaderTicket) return deniedSource("Loader ticket missing");
 
-  if (!key) {
-    return deniedSource();
-  }
-
-  if (!deviceId) return deniedSource();
+  if (!key) return deniedSource("Missing key");
+  if (!deviceId) return deniedSource("Missing HWID");
 
   // Fast path: hash the license key and HWID in parallel, then fetch the
   // license, blacklist state and requested script in one D1 query.
@@ -1301,7 +1297,7 @@ async function handleProtectedLoader(request, env, ctx) {
   }
 
   if (!row) {
-    return deniedSource();
+    return deniedSource("Invalid key");
   }
 
   await recoverLegacyLoaderProbe(env, row, deviceHash);
@@ -1344,10 +1340,10 @@ async function handleProtectedLoader(request, env, ctx) {
     if (!row.hwid_hash) {
       // Only the first device bind requires an awaited write. Normal executions
       // skip this write completely.
-      if (!await bindDevice(env, row, deviceHash, timestamp)) return deniedSource();
+      if (!await bindDevice(env, row, deviceHash, timestamp)) return deniedSource("HWID bind failed");
       row.hwid_hash = deviceHash;
     } else if (row.hwid_hash !== deviceHash) {
-      return deniedSource();
+      return deniedSource("HWID mismatch");
     }
   }
 
@@ -1382,7 +1378,7 @@ async function handleProtectedLoader(request, env, ctx) {
     scriptId: script.id,
     deviceHash,
     ffa: false,
-  })) return deniedSource();
+  })) return deniedSource("Loader ticket invalid or expired");
 
   const executionLog = env.DB.prepare("INSERT INTO executions (guild_id, license_id, occurred_at) VALUES (?, ?, ?)")
     .bind(row.guild_id, row.id, timestamp)
@@ -1687,7 +1683,9 @@ if status~=200 then
     if string.find(tostring(body),"Blacklisted",1,true) then
         K("Blacklisted")
     else
-        K("Eternal Auth denied access ("..tostring(status).."). Check your key and HWID.")
+        local reason=tostring(body or "")
+        if reason=="" then reason="Access denied" end
+        K("Eternal Auth: "..reason)
     end
     return
 end
@@ -1711,40 +1709,66 @@ end
 fn()`;
 }
 
+async function tryD1(label, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    console.error(`Eternal Auth D1 migration warning [${label}]`, error);
+    return null;
+  }
+}
+
+async function ensureAdminAuthSchema(env) {
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_credentials (
+      id TEXT PRIMARY KEY,
+      password_salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      iterations INTEGER NOT NULL DEFAULT 100000,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_sessions (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_state (
+      id TEXT PRIMARY KEY,
+      last_guild_id TEXT,
+      active_tab TEXT NOT NULL DEFAULT 'gateway',
+      preferences_json TEXT NOT NULL DEFAULT '{}',
+      updated_at INTEGER NOT NULL
+    )`),
+  ]);
+
+  await tryD1("admin_sessions index", () =>
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at)").run()
+  );
+
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO admin_state (id, active_tab, preferences_json, updated_at)
+     VALUES ('primary', 'gateway', '{}', ?)`
+  ).bind(now()).run();
+}
+
 async function ensureBackendPersistenceSchema(env) {
   if (backendSchemaReadyPromise) return backendSchemaReadyPromise;
 
   backendSchemaReadyPromise = (async () => {
-    await env.DB.batch([
-      env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_credentials (
-        id TEXT PRIMARY KEY,
-        password_salt TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
-        iterations INTEGER NOT NULL DEFAULT 100000,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`),
-      env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_sessions (
-        id TEXT PRIMARY KEY,
-        token_hash TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        last_seen_at INTEGER NOT NULL
-      )`),
-      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
-        ON admin_sessions(expires_at)`),
-      env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_state (
-        id TEXT PRIMARY KEY,
-        last_guild_id TEXT,
-        active_tab TEXT NOT NULL DEFAULT 'gateway',
-        preferences_json TEXT NOT NULL DEFAULT '{}',
-        updated_at INTEGER NOT NULL
-      )`),
+    await ensureAdminAuthSchema(env);
+
+    await tryD1("runtime_state table", () =>
       env.DB.prepare(`CREATE TABLE IF NOT EXISTS runtime_state (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
         updated_at INTEGER NOT NULL
-      )`),
+      )`).run()
+    );
+
+    await tryD1("panels table", () =>
       env.DB.prepare(`CREATE TABLE IF NOT EXISTS panels (
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
@@ -1757,9 +1781,10 @@ async function ensureBackendPersistenceSchema(env) {
         created_by TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-      )`),
-      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_panels_guild_active
-        ON panels(guild_id, active, created_at DESC)`),
+      )`).run()
+    );
+
+    await tryD1("panel_drafts table", () =>
       env.DB.prepare(`CREATE TABLE IF NOT EXISTS panel_drafts (
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
@@ -1772,54 +1797,81 @@ async function ensureBackendPersistenceSchema(env) {
         created_by TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
-      )`),
-      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_panel_drafts_expires
-        ON panel_drafts(expires_at)`),
-    ]);
+      )`).run()
+    );
 
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO admin_state (id, active_tab, preferences_json, updated_at)
-       VALUES ('primary', 'gateway', '{}', ?)`
-    ).bind(now()).run();
-
-    // v1.7 added encrypted storage for generated server setup keys. Check the
-    // live schema first so this is safe both before and after the SQL migration.
-    const tableInfo = await env.DB.prepare("PRAGMA table_info(server_setup_keys)").all();
+    const tableInfo = await tryD1("server_setup_keys info", () =>
+      env.DB.prepare("PRAGMA table_info(server_setup_keys)").all()
+    );
     const columns = Array.isArray(tableInfo?.results) ? tableInfo.results : [];
     if (columns.length && !columns.some((column) => String(column.name) === "key_enc")) {
-      await env.DB.prepare("ALTER TABLE server_setup_keys ADD COLUMN key_enc TEXT").run();
+      await tryD1("server_setup_keys.key_enc", () =>
+        env.DB.prepare("ALTER TABLE server_setup_keys ADD COLUMN key_enc TEXT").run()
+      );
     }
 
-    const panelInfo = await env.DB.prepare("PRAGMA table_info(panels)").all();
+    const panelInfo = await tryD1("panels info", () => env.DB.prepare("PRAGMA table_info(panels)").all());
     const panelColumns = Array.isArray(panelInfo?.results) ? panelInfo.results : [];
     const panelColumnNames = new Set(panelColumns.map((column) => String(column.name)));
-    if (panelColumns.length && !panelColumnNames.has("embed_title")) {
-      await env.DB.prepare("ALTER TABLE panels ADD COLUMN embed_title TEXT").run();
+    const panelAdds = [
+      ["active", "INTEGER NOT NULL DEFAULT 1"],
+      ["created_at", "INTEGER NOT NULL DEFAULT 0"],
+      ["updated_at", "INTEGER NOT NULL DEFAULT 0"],
+      ["embed_title", "TEXT"],
+      ["embed_description", "TEXT"],
+      ["embed_color", "INTEGER"],
+      ["script_id", "TEXT"],
+    ];
+    for (const [name, definition] of panelAdds) {
+      if (panelColumns.length && !panelColumnNames.has(name)) {
+        await tryD1(`panels.${name}`, () =>
+          env.DB.prepare(`ALTER TABLE panels ADD COLUMN ${name} ${definition}`).run()
+        );
+      }
     }
-    if (panelColumns.length && !panelColumnNames.has("embed_description")) {
-      await env.DB.prepare("ALTER TABLE panels ADD COLUMN embed_description TEXT").run();
-    }
-    if (panelColumns.length && !panelColumnNames.has("embed_color")) {
-      await env.DB.prepare("ALTER TABLE panels ADD COLUMN embed_color INTEGER").run();
-    }
-    if (panelColumns.length && !panelColumnNames.has("script_id")) {
-      await env.DB.prepare("ALTER TABLE panels ADD COLUMN script_id TEXT").run();
-    }
+    await tryD1("panels index", () =>
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_panels_guild_active ON panels(guild_id, active, created_at DESC)").run()
+    );
 
-    // v1.8.8 FFA is an additive script setting. Self-migrate existing D1
-    // databases so Git-connected deployments do not need a separate CLI step.
-    const scriptInfo = await env.DB.prepare("PRAGMA table_info(scripts)").all();
+    const draftInfo = await tryD1("panel_drafts info", () => env.DB.prepare("PRAGMA table_info(panel_drafts)").all());
+    const draftColumns = Array.isArray(draftInfo?.results) ? draftInfo.results : [];
+    const draftNames = new Set(draftColumns.map((column) => String(column.name)));
+    if (draftColumns.length && !draftNames.has("expires_at")) {
+      await tryD1("panel_drafts.expires_at", () =>
+        env.DB.prepare("ALTER TABLE panel_drafts ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0").run()
+      );
+    }
+    await tryD1("panel_drafts index", () =>
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_panel_drafts_expires ON panel_drafts(expires_at)").run()
+    );
+
+    const scriptInfo = await tryD1("scripts info", () => env.DB.prepare("PRAGMA table_info(scripts)").all());
     const scriptColumns = Array.isArray(scriptInfo?.results) ? scriptInfo.results : [];
     if (scriptColumns.length && !scriptColumns.some((column) => String(column.name) === "ffa_enabled")) {
-      await env.DB.prepare("ALTER TABLE scripts ADD COLUMN ffa_enabled INTEGER NOT NULL DEFAULT 0").run();
+      await tryD1("scripts.ffa_enabled", () =>
+        env.DB.prepare("ALTER TABLE scripts ADD COLUMN ffa_enabled INTEGER NOT NULL DEFAULT 0").run()
+      );
     }
 
-    const licenseInfo = await env.DB.prepare("PRAGMA table_info(licenses)").all();
+    const licenseInfo = await tryD1("licenses info", () => env.DB.prepare("PRAGMA table_info(licenses)").all());
     const licenseColumns = Array.isArray(licenseInfo?.results) ? licenseInfo.results : [];
-    if (licenseColumns.length && !licenseColumns.some((column) => String(column.name) === "panel_id")) {
-      await env.DB.prepare("ALTER TABLE licenses ADD COLUMN panel_id TEXT").run();
+    const licenseNames = new Set(licenseColumns.map((column) => String(column.name)));
+    if (licenseColumns.length && !licenseNames.has("panel_id")) {
+      await tryD1("licenses.panel_id", () =>
+        env.DB.prepare("ALTER TABLE licenses ADD COLUMN panel_id TEXT").run()
+      );
     }
-    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)").run();
+    if (!licenseColumns.length || licenseNames.has("panel_id")) {
+      await tryD1("licenses panel index", () =>
+        env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)").run()
+      );
+    } else {
+      // The ALTER may have just succeeded; retry the index without making
+      // dashboard authentication depend on it.
+      await tryD1("licenses panel index after migration", () =>
+        env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_licenses_guild_panel ON licenses(guild_id, panel_id, status)").run()
+      );
+    }
 
     return true;
   })().catch((error) => {

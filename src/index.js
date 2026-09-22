@@ -1889,28 +1889,90 @@ local function __ea_blacklist_clipboard(original)
     K("Blacklisted")
 end
 
-local function __ea_wrap_clipboard(env,name)
-    local original=rawget(env,name)
-    if type(original)~="function" then return end
-    local wrapped=function(value,...)
+local __ea_clipboard_seen={}
+local __ea_clipboard_wrappers={}
+
+local function __ea_make_clipboard_wrapper(original)
+    local passthrough=original
+    local wrapped
+    wrapped=function(value,...)
         local text=tostring(value or "")
         if __ea_source then
             if __ea_is_source_copy(text) then
-                __ea_blacklist_clipboard(original)
+                __ea_blacklist_clipboard(passthrough)
                 return nil
             end
-        elseif #__ea_pending_clipboard<12 then
-            table.insert(__ea_pending_clipboard,{fn=original,value=text})
+        elseif #__ea_pending_clipboard<24 then
+            table.insert(__ea_pending_clipboard,{fn=passthrough,value=text})
         end
-        return original(value,...)
+        return passthrough(value,...)
     end
-    pcall(function() env[name]=wrapped end)
+    return wrapped,function(fn) passthrough=fn end
 end
 
-for _,env in ipairs({_G,e}) do
-    if type(env)=="table" then
-        for _,name in ipairs({"setclipboard","toclipboard","writeclipboard"}) do
-            __ea_wrap_clipboard(env,name)
+local function __ea_wrap_clipboard(env,name)
+    local ok,original=pcall(function() return rawget(env,name) end)
+    if not ok or type(original)~="function" then return end
+
+    local existing=__ea_clipboard_wrappers[original]
+    if existing then
+        pcall(function() env[name]=existing end)
+        return
+    end
+
+    local wrapped,setPassthrough=__ea_make_clipboard_wrapper(original)
+    local installed=false
+
+    if type(hookfunction)=="function" and not __ea_clipboard_seen[original] then
+        __ea_clipboard_seen[original]=true
+        local hookOk,old=pcall(hookfunction,original,wrapped)
+        if hookOk and type(old)=="function" then
+            setPassthrough(old)
+            installed=true
+        end
+    end
+
+    __ea_clipboard_wrappers[original]=wrapped
+    __ea_clipboard_wrappers[wrapped]=wrapped
+    pcall(function() env[name]=wrapped end)
+    return installed
+end
+
+local __ea_clipboard_envs={}
+local __ea_clipboard_env_seen={}
+local function __ea_add_clipboard_env(env)
+    if type(env)=="table" and not __ea_clipboard_env_seen[env] then
+        __ea_clipboard_env_seen[env]=true
+        table.insert(__ea_clipboard_envs,env)
+    end
+end
+
+__ea_add_clipboard_env(_G)
+__ea_add_clipboard_env(e)
+pcall(function() if type(getgenv)=="function" then __ea_add_clipboard_env(getgenv()) end end)
+pcall(function() if type(getrenv)=="function" then __ea_add_clipboard_env(getrenv()) end end)
+pcall(function() if type(getfenv)=="function" then __ea_add_clipboard_env(getfenv(0)) end end)
+
+local __ea_clipboard_names={
+    "setclipboard","toclipboard","writeclipboard",
+    "set_clipboard","write_clipboard","setrbxclipboard",
+    "copyclipboard","clipboardset","setclip"
+}
+local __ea_clipboard_child_names={
+    "set","write","copy","setclipboard","toclipboard","writeclipboard",
+    "set_clipboard","write_clipboard","setclip"
+}
+
+for _,env in ipairs(__ea_clipboard_envs) do
+    for _,name in ipairs(__ea_clipboard_names) do
+        __ea_wrap_clipboard(env,name)
+    end
+    for _,tableName in ipairs({"clipboard","Clipboard","syn"}) do
+        local ok,t=pcall(function() return rawget(env,tableName) end)
+        if ok and type(t)=="table" then
+            for _,name in ipairs(__ea_clipboard_child_names) do
+                __ea_wrap_clipboard(t,name)
+            end
         end
     end
 end

@@ -199,77 +199,97 @@ export function authenticatedLauncher(url, key = null) {
   return `${key === null ? '-- Set script_key to your license key before running.' : 'script_key=' + JSON.stringify(key)}
 local e=(getgenv and getgenv()) or _G
 local k=script_key or e.script_key
-local function stop() pcall(function() game:GetService("Players").LocalPlayer:Kick("Blacklisted") end) end
-if not k or tostring(k)=="" or tostring(k)=="KEY" then stop() return end
+local function stop(msg)
+    pcall(function()
+        game:GetService("Players").LocalPlayer:Kick(tostring(msg or "Authentication failed."))
+    end)
+end
+if not k or tostring(k)=="" or tostring(k)=="KEY" then stop("Missing script key") return end
 local h=game:GetService("HttpService")
 local d
 pcall(function() if type(gethwid)=="function" then d=gethwid() end end)
 if not d or tostring(d)=="" then
     if readfile and writefile then
         local ok,v=pcall(readfile,"eternal_auth_device.txt")
-        if ok and v and v~="" then d=v else d=h:GenerateGUID(false) pcall(writefile,"eternal_auth_device.txt",d) end
+        if ok and v and v~="" then
+            d=v
+        else
+            d=h:GenerateGUID(false)
+            pcall(writefile,"eternal_auth_device.txt",d)
+        end
     end
 end
-if not d or tostring(d)=="" then stop() return end
+if not d or tostring(d)=="" then stop("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
-if not req then stop() return end
-${clientHardeningLua()}
-local __ea_loadstring=loadstring
-local __ea_hook_score=0
-if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
-if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
-if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
-if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
-__ea_hook_score=__ea_hook_score+__ea_http_hook_score()+__ea_websocket_hook_score()
-if __ea_known_logger_file or __ea_spy_env_detected() or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
+if type(req)~="function" then stop("HTTP request unavailable") return end
 e.script_key=k
-local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={Authorization="Bearer "..tostring(k),["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
-if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
-local f=__ea_loadstring(r.Body or r.body or "")
-pcall(function()
-    r.Body=""
-    r.body=""
-end)
-if not f then stop() return end
-local okRun,runErr=pcall(f)
-f=nil
-if not okRun then error(runErr,0) end`;
+local ok,r=pcall(req,{
+    Url=${JSON.stringify(url)},
+    Method="GET",
+    Headers={
+        Authorization="Bearer "..tostring(k),
+        ["X-Eternal-Device"]=tostring(d),
+        ["X-Eternal-Execute"]="1"
+    }
+})
+if not ok or not r then stop("Eternal Auth connection failed") return end
+local code=tonumber(r.StatusCode or r.status_code or 0)
+local body=r.Body or r.body or ""
+if code~=200 then
+    stop(string.find(body,"Blacklisted",1,true) and "Blacklisted" or ("Eternal Auth denied access ("..tostring(code)..")"))
+    return
+end
+if type(loadstring)~="function" then stop("loadstring unavailable") return end
+local fn,err=loadstring(body)
+pcall(function() r.Body="" r.body="" end)
+body=nil
+if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
+fn()`;
 }
-
 export function ffaLauncher(url) {
   return `-- Eternal Auth FFA loader (no key required)
-local e=(getgenv and getgenv()) or _G
 local h=game:GetService("HttpService")
-local function stop() pcall(function() game:GetService("Players").LocalPlayer:Kick("Blacklisted") end) end
+local function stop(msg)
+    pcall(function()
+        game:GetService("Players").LocalPlayer:Kick(tostring(msg or "Authentication failed."))
+    end)
+end
 local d
 pcall(function() if type(gethwid)=="function" then d=gethwid() end end)
 if not d or tostring(d)=="" then
     if readfile and writefile then
         local ok,v=pcall(readfile,"eternal_auth_device.txt")
-        if ok and v and v~="" then d=v else d=h:GenerateGUID(false) pcall(writefile,"eternal_auth_device.txt",d) end
+        if ok and v and v~="" then
+            d=v
+        else
+            d=h:GenerateGUID(false)
+            pcall(writefile,"eternal_auth_device.txt",d)
+        end
     end
 end
-if not d or tostring(d)=="" then stop() return end
+if not d or tostring(d)=="" then stop("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
-if not req then stop() return end
-${clientHardeningLua()}
-local __ea_loadstring=loadstring
-local __ea_hook_score=0
-if __ea_obviously_hooked(__ea_loadstring) then __ea_hook_score=__ea_hook_score+2 end
-if __ea_obviously_hooked(req) then __ea_hook_score=__ea_hook_score+2 end
-if type(require)=="function" and __ea_obviously_hooked(require) then __ea_hook_score=__ea_hook_score+1 end
-if type(gethwid)=="function" and __ea_obviously_hooked(gethwid) then __ea_hook_score=__ea_hook_score+2 end
-__ea_hook_score=__ea_hook_score+__ea_http_hook_score()+__ea_websocket_hook_score()
-if __ea_known_logger_file or __ea_spy_env_detected() or __ea_hook_score>=3 or __ea_hwid_spoofed() then stop() return end
-local ok,r=pcall(req,{Url=${JSON.stringify(url)},Method="GET",Headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Execute"]="1"}})
-if not ok or not r or tonumber(r.StatusCode or r.status_code)~=200 then stop() return end
-local f=__ea_loadstring(r.Body or r.body or "")
-pcall(function()
-    r.Body=""
-    r.body=""
-end)
-if not f then stop() return end
-local okRun,runErr=pcall(f)
-f=nil
-if not okRun then error(runErr,0) end`;
+if type(req)~="function" then stop("HTTP request unavailable") return end
+local ok,r=pcall(req,{
+    Url=${JSON.stringify(url)},
+    Method="GET",
+    Headers={
+        ["X-Eternal-Device"]=tostring(d),
+        ["X-Eternal-Execute"]="1"
+    }
+})
+if not ok or not r then stop("Eternal Auth connection failed") return end
+local code=tonumber(r.StatusCode or r.status_code or 0)
+local body=r.Body or r.body or ""
+if code~=200 then
+    stop(string.find(body,"Blacklisted",1,true) and "Blacklisted" or ("Eternal Auth denied access ("..tostring(code)..")"))
+    return
+end
+if type(loadstring)~="function" then stop("loadstring unavailable") return end
+local fn,err=loadstring(body)
+pcall(function() r.Body="" r.body="" end)
+body=nil
+if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
+fn()`;
 }
+

@@ -467,6 +467,54 @@ async function ensureGatewayPresence(env) {
   return data;
 }
 
+async function serveWebsiteAsset(request, env) {
+  if (!env?.ASSETS || typeof env.ASSETS.fetch !== "function") {
+    console.error("Eternal Auth ASSETS binding is unavailable");
+    return new Response(
+      "<!doctype html><meta charset=\"utf-8\"><title>Eternal Auth</title><h1>Eternal Auth site assets are unavailable.</h1>",
+      {
+        status: 503,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      },
+    );
+  }
+
+  try {
+    let response = await env.ASSETS.fetch(request);
+    const url = new URL(request.url);
+    const accept = (request.headers.get("accept") || "").toLowerCase();
+    const wantsHtml = request.method === "GET" && (accept.includes("text/html") || accept.includes("application/xhtml+xml"));
+    const looksLikeFile = /\/[^/]+\.[a-z0-9]{1,12}$/i.test(url.pathname);
+
+    // SPA/browser fallback: if a normal page route is not a concrete asset,
+    // serve the real Eternal Auth index instead of surfacing a Worker 500/404.
+    if (response.status === 404 && wantsHtml && !looksLikeFile) {
+      const indexUrl = new URL("/index.html", request.url);
+      response = await env.ASSETS.fetch(new Request(indexUrl, {
+        method: "GET",
+        headers: request.headers,
+      }));
+    }
+
+    return withSecurityHeaders(response);
+  } catch (error) {
+    console.error("Eternal Auth asset serving failed", error);
+    return new Response(
+      "<!doctype html><meta charset=\"utf-8\"><title>Eternal Auth</title><h1>Eternal Auth website could not load.</h1><p>Please try again in a moment.</p>",
+      {
+        status: 503,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      },
+    );
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -572,8 +620,7 @@ export default {
         }
       }
 
-      const assetResponse = await env.ASSETS.fetch(request);
-      return withSecurityHeaders(assetResponse);
+      return serveWebsiteAsset(request, env);
     } catch (error) {
       console.error(error);
       return json({ ok: false, error: "Internal server error" }, 500);
@@ -1259,14 +1306,14 @@ async function handleProtectedLoader(request, env, ctx) {
 
   await recoverLegacyLoaderProbe(env, row, deviceHash);
   if (row.status === "security_blacklisted" || await deviceBlocked(env, row.guild_id, deviceHash, row.hwid_hash)) {
-    return deniedSource();
+    return blacklistedSource();
   }
   const timestamp = now();
   const blacklistExpiry = row.ea_blacklist_expires_at == null ? null : Number(row.ea_blacklist_expires_at);
   const hasActiveBlacklist = blacklistExpiry != null && (blacklistExpiry === -1 || blacklistExpiry > timestamp);
 
   if (hasActiveBlacklist) {
-    return deniedSource();
+    return blacklistedSource();
   }
 
   // Expired temporary blacklist cleanup is not part of the critical loader
@@ -1472,7 +1519,7 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     if (!assignedPanel || assignedPanel.script_id !== script.id) return deniedSource();
   }
   const valid = await validateLicense(env, license, credentials.deviceId, true);
-  if (!valid.ok) return deniedSource();
+  if (!valid.ok) return valid.error === "Blacklisted" ? blacklistedSource() : deniedSource(valid.error);
   if (!hasLoaderExecutionIntent(request)) {
     const cleanUrl = `${new URL(request.url).origin}/files/v4/loaders/${loaderId}.lua`;
     return new Response(authenticatedLauncher(cleanUrl), {
@@ -1507,7 +1554,7 @@ async function handleFfaPublicLoader(request, env, loaderId) {
   const guild = await env.DB.prepare("SELECT * FROM guilds WHERE guild_id = ? LIMIT 1").bind(script.guild_id).first();
   if (!guild?.active) return deniedSource();
   const deviceHash = await hashDevice(env, deviceId);
-  if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
+  if (await deviceBlocked(env, guild.guild_id, deviceHash)) return blacklistedSource();
   // FFA requests have no account secret. Require the execution-only launcher
   // marker, but do not trust a caller-supplied raw HWID enough to blacklist it
   // until the signed in-runtime report proof is available.
@@ -1541,7 +1588,7 @@ async function handleFfaProtectedLoader(request, env) {
   const guild = await env.DB.prepare("SELECT * FROM guilds WHERE guild_id = ? LIMIT 1").bind(script.guild_id).first();
   if (!guild?.active) return deniedSource();
   const deviceHash = await hashDevice(env, deviceId);
-  if (await deviceBlocked(env, guild.guild_id, deviceHash)) return deniedSource();
+  if (await deviceBlocked(env, guild.guild_id, deviceHash)) return blacklistedSource();
   if (!await verifyLoaderTicket(env, request, loaderTicket, {
     licenseId: "FFA",
     scriptId: script.id,
@@ -1554,8 +1601,26 @@ async function handleFfaProtectedLoader(request, env) {
   });
 }
 
-function deniedSource() {
-  return new Response("Blacklisted", { status: 403, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" } });
+function deniedSource(message = "Access denied") {
+  return new Response(String(message || "Access denied"), {
+    status: 403,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "private, no-store, max-age=0",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+function blacklistedSource() {
+  return new Response("Blacklisted", {
+    status: 403,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "private, no-store, max-age=0",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }
 
 function sourceCredentials(request) {

@@ -279,29 +279,44 @@ test('FFA signed reports are informational and never create HWID bans', async ()
   assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
 });
 
-test('protected source requires signed ticket and ticket is bound to client IP', async () => {
+test('protected source requires a signed single-use ticket but tolerates IP and UA changes', async () => {
   const {env}=await fixture();
   let response=await api.handleProtectedLoader(directRequest({key:'valid-key',device_id:'a',script_id:'s'}),env);
   assert.equal(response.status,403);
 
   const stage1=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{
-    headers:{authorization:'Bearer valid-key','x-eternal-device':'a','x-eternal-execute':'1','cf-connecting-ip':TEST_IP}
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'a',
+      'x-eternal-execute':'1',
+      'cf-connecting-ip':TEST_IP,
+      'user-agent':'StageOneClient/1'
+    }
   });
   const bootstrapResponse=await api.handlePublicLoader(stage1,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
   assert.equal(bootstrapResponse.status,200);
   const ticket=ticketFromBootstrap(await bootstrapResponse.text());
   assert.ok(ticket);
-  response=await api.handleProtectedLoader(new Request('https://auth.test/api/v1/loader?script_id=s',{
+
+  const protectedRequest=()=>new Request('https://auth.test/api/v1/loader?script_id=s',{
     method:'POST',
     headers:{
       authorization:'Bearer valid-key',
       'x-eternal-device':'a',
       'x-eternal-ticket':ticket,
       'x-eternal-execute':'1',
-      'cf-connecting-ip':'198.51.100.77'
+      'cf-connecting-ip':'198.51.100.77',
+      'user-agent':'StageTwoClient/9'
     }
-  }),env);
+  });
+
+  response=await api.handleProtectedLoader(protectedRequest(),env);
+  assert.equal(response.status,200);
+  assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
+
+  response=await api.handleProtectedLoader(protectedRequest(),env);
   assert.equal(response.status,403);
+  assert.match(await response.text(),/ticket/i);
 });
 
 test('user reset reports remaining seconds within five-minute cooldown', async () => {

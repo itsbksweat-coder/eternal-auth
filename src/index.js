@@ -3608,7 +3608,7 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
   }] : undefined;
 
   const content = mobileFormat
-    ? cleanLoader.split("\n").map((line) => `\`${line}\``).join("\n")
+    ? `\`${cleanLoader.replace("\n", "; ")}\``
     : `\`\`\`lua
 ${cleanLoader}
 \`\`\``;

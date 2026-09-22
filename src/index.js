@@ -1809,6 +1809,8 @@ async function ensureAdminAuthSchema(env) {
   ).bind(now()).run();
 }
 
+let backendSchemaReadyPromise = null;
+
 async function ensureBackendPersistenceSchema(env) {
   if (backendSchemaReadyPromise) return backendSchemaReadyPromise;
 

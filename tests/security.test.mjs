@@ -536,8 +536,11 @@ test('protected source requires a signed single-use ticket but tolerates IP and 
   });
   const bootstrapResponse=await api.handlePublicLoader(stage1,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
   assert.equal(bootstrapResponse.status,200);
-  const ticket=ticketFromBootstrap(await bootstrapResponse.text());
+  const bootstrap=await bootstrapResponse.text();
+  const ticket=ticketFromBootstrap(bootstrap);
+  const stageProof=stageProofFromBootstrap(bootstrap);
   assert.ok(ticket);
+  assert.ok(stageProof);
 
   const protectedRequest=()=>new Request('https://auth.test/api/v1/loader?script_id=s',{
     method:'POST',
@@ -545,6 +548,7 @@ test('protected source requires a signed single-use ticket but tolerates IP and 
       authorization:'Bearer valid-key',
       'x-eternal-device':'a',
       'x-eternal-ticket':ticket,
+      'x-eternal-stage-proof':stageProof,
       'x-eternal-execute':'1',
       'cf-connecting-ip':'198.51.100.77',
       'user-agent':'StageTwoClient/9'

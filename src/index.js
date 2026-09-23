@@ -768,17 +768,22 @@ function pruneUsedLoaderTickets() {
 
 async function createLoaderTicket(env, request, { licenseId, scriptId, deviceHash, ffa = false }) {
   if (!env.CONFIG_SECRET) throw new Error("CONFIG_SECRET is not configured");
+  const challenge = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(18)));
   const claims = {
     l: String(licenseId || ""),
     s: String(scriptId || ""),
     d: String(deviceHash || ""),
     e: now() + 60,
     n: bytesToBase64Url(crypto.getRandomValues(new Uint8Array(12))),
+    c: challenge,
     f: ffa ? 1 : 0,
   };
   const body = bytesToBase64Url(enc.encode(JSON.stringify(claims)));
   const signature = bytesToBase64Url(await hmacBytes(env.CONFIG_SECRET, `loader-ticket:${body}`));
-  return `${body}.${signature}`;
+  return {
+    token: `${body}.${signature}`,
+    challenge,
+  };
 }
 
 async function verifyLoaderTicket(env, request, token, expected) {
@@ -801,6 +806,13 @@ async function verifyLoaderTicket(env, request, token, expected) {
   if (String(claims.s || "") !== String(expected.scriptId || "")) return false;
   if (String(claims.d || "") !== String(expected.deviceHash || "")) return false;
   if (Number(claims.f || 0) !== (expected.ffa ? 1 : 0)) return false;
+
+  // Every protected stage after the public loader must prove the previous
+  // stage actually ran. The bootstrap receives the challenge reversed and
+  // reverses it locally before sending it back.
+  const stageProof = cleanText(request.headers.get("x-eternal-stage-proof"), 512);
+  if (!claims.c || !stageProof) return false;
+  if (!await safeEqualText(stageProof, String(claims.c))) return false;
 
   // Best-effort replay resistance across requests handled by the same Worker
   // isolate. The signed ticket is already short-lived and client-bound; this
@@ -1653,13 +1665,20 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
     });
   }
   const deviceHash = await hashDevice(env, credentials.deviceId);
-  const loaderTicket = await createLoaderTicket(env, request, {
+  const loaderGrant = await createLoaderTicket(env, request, {
     licenseId: license.id,
     scriptId: script.id,
     deviceHash,
     ffa: false,
   });
-  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, false, "", loaderTicket), {
+  return new Response(buildBootstrapSource(
+    new URL(request.url).origin,
+    script.id,
+    false,
+    "",
+    loaderGrant.token,
+    loaderGrant.challenge,
+  ), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "Authorization, X-Eternal-Device", "x-content-type-options": "nosniff" },
   });
@@ -1688,13 +1707,20 @@ async function handleFfaPublicLoader(request, env, loaderId) {
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
   });
   const reportToken = await createFfaReportToken(env, guild.guild_id, script.id, deviceHash);
-  const loaderTicket = await createLoaderTicket(env, request, {
+  const loaderGrant = await createLoaderTicket(env, request, {
     licenseId: "FFA",
     scriptId: script.id,
     deviceHash,
     ffa: true,
   });
-  return new Response(buildBootstrapSource(new URL(request.url).origin, script.id, true, reportToken, loaderTicket), {
+  return new Response(buildBootstrapSource(
+    new URL(request.url).origin,
+    script.id,
+    true,
+    reportToken,
+    loaderGrant.token,
+    loaderGrant.challenge,
+  ), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "vary": "X-Eternal-Device", "x-content-type-options": "nosniff" },
   });
@@ -1788,7 +1814,7 @@ async function migrateLegacyDeviceBinding(env, license, deviceId, legacyDeviceId
 }
 
 
-function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "", loaderTicket = "") {
+function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "", loaderTicket = "", stageChallenge = "") {
   const apiUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa-loader" : "loader"}?script_id=${encodeURIComponent(scriptId)}`;
   const securityReportUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`;
   const keySetup = ffa
@@ -1819,9 +1845,10 @@ end`
     end)
 end`;
 
+  const reversedStageChallenge = String(stageChallenge || "").split("").reverse().join("");
   const protectedHeaders = ffa
-    ? `local headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`
-    : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Execute"]="1"}`;
+    ? `local headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Stage-Proof"]=__ea_stage_proof,["X-Eternal-Execute"]="1"}`
+    : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Stage-Proof"]=__ea_stage_proof,["X-Eternal-Execute"]="1"}`;
 
   return `-- Eternal Auth protected bootstrap
 local H=game:GetService("HttpService")
@@ -1860,6 +1887,8 @@ local req=request or http_request or (syn and syn.request) or (http and http.req
 if type(req)~="function" then K("Eternal Auth requires an HTTP request function.") return end
 
 local u=${JSON.stringify(apiUrl)}
+local __ea_stage_reverse=${JSON.stringify(reversedStageChallenge)}
+local __ea_stage_proof=string.reverse(__ea_stage_reverse)
 ${protectedHeaders}
 ${reportLua}
 

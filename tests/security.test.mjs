@@ -35,6 +35,11 @@ function ticketFromBootstrap(lua) {
   return lua.match(/\["X-Eternal-Ticket"\]=\"([^\"]+)\"/)?.[1] || null;
 }
 
+function stageProofFromBootstrap(lua) {
+  const reversed = lua.match(/local __ea_stage_reverse="([^"]*)"/)?.[1] ?? null;
+  return reversed == null ? null : [...reversed].reverse().join('');
+}
+
 async function secureProtectedResponse(env, { key='valid-key', deviceId='a', scriptId='s', loaderId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ip=TEST_IP } = {}) {
   const stage1 = new Request(`https://auth.test/files/v4/loaders/${loaderId}.lua`, {
     headers: {
@@ -48,13 +53,16 @@ async function secureProtectedResponse(env, { key='valid-key', deviceId='a', scr
   if (bootstrapResponse.status !== 200) return bootstrapResponse;
   const bootstrap = await bootstrapResponse.text();
   const ticket = ticketFromBootstrap(bootstrap);
+  const stageProof = stageProofFromBootstrap(bootstrap);
   assert.ok(ticket, 'bootstrap should contain a signed loader ticket');
+  assert.ok(stageProof, 'bootstrap should contain a reversible stage challenge');
   const stage2 = new Request(`https://auth.test/api/v1/loader?script_id=${encodeURIComponent(scriptId)}`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${key}`,
       'x-eternal-device': deviceId,
       'x-eternal-ticket': ticket,
+      'x-eternal-stage-proof': stageProof,
       'x-eternal-execute': '1',
       'cf-connecting-ip': ip,
     },
@@ -74,12 +82,15 @@ async function secureFfaResponse(env, { deviceId='ffa-device', scriptId='s', loa
   if (bootstrapResponse.status !== 200) return bootstrapResponse;
   const bootstrap = await bootstrapResponse.text();
   const ticket = ticketFromBootstrap(bootstrap);
+  const stageProof = stageProofFromBootstrap(bootstrap);
   assert.ok(ticket, 'FFA bootstrap should contain a signed loader ticket');
+  assert.ok(stageProof, 'FFA bootstrap should contain a reversible stage challenge');
   const stage2 = new Request(`https://auth.test/api/v1/ffa-loader?script_id=${encodeURIComponent(scriptId)}`, {
     method: 'POST',
     headers: {
       'x-eternal-device': deviceId,
       'x-eternal-ticket': ticket,
+      'x-eternal-stage-proof': stageProof,
       'x-eternal-execute': '1',
       'cf-connecting-ip': ip,
     },
@@ -205,6 +216,9 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/Blacklisted/);
   assert.match(lua,/#candidate>=128/);
   assert.match(lua,/X-Eternal-Ticket/);
+  assert.match(lua,/X-Eternal-Stage-Proof/);
+  assert.match(lua,/local __ea_stage_reverse=/);
+  assert.match(lua,/string\.reverse\(__ea_stage_reverse\)/);
   assert.match(lua,/X-Eternal-Execute/);
   assert.match(lua,/loadstring\(body\)/);
   assert.match(lua,/body=nil/);
@@ -448,6 +462,62 @@ test('FFA clipboard source leak persistently blocks the device', async () => {
     "SELECT reason FROM hwid_blacklists WHERE guild_id='123456789012345678' LIMIT 1"
   ).get();
   assert.equal(row.reason,'clipboard_source_confirmed');
+});
+
+test('protected stage rejects direct or tampered execution without prior-stage proof', async () => {
+  const {env}=await fixture();
+
+  const stage1=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'stage-proof-device',
+      'x-eternal-execute':'1',
+    },
+  });
+  const bootstrapResponse=await api.handlePublicLoader(stage1,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(bootstrapResponse.status,200);
+  const bootstrap=await bootstrapResponse.text();
+  const ticket=ticketFromBootstrap(bootstrap);
+  const proof=stageProofFromBootstrap(bootstrap);
+  assert.ok(ticket);
+  assert.ok(proof);
+
+  let response=await api.handleProtectedLoader(new Request(
+    'https://auth.test/api/v1/loader?script_id=s',
+    {method:'POST',headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'stage-proof-device',
+      'x-eternal-ticket':ticket,
+      'x-eternal-execute':'1',
+    }}
+  ),env);
+  assert.equal(response.status,403);
+  assert.match(await response.text(),/Loader ticket invalid or expired/);
+
+  const stage1b=new Request('https://auth.test/files/v4/loaders/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{
+    headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'stage-proof-device',
+      'x-eternal-execute':'1',
+    },
+  });
+  const bootstrapResponse2=await api.handlePublicLoader(stage1b,env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',{waitUntil(){}});
+  assert.equal(bootstrapResponse2.status,200);
+  const bootstrap2=await bootstrapResponse2.text();
+  const ticket2=ticketFromBootstrap(bootstrap2);
+
+  response=await api.handleProtectedLoader(new Request(
+    'https://auth.test/api/v1/loader?script_id=s',
+    {method:'POST',headers:{
+      authorization:'Bearer valid-key',
+      'x-eternal-device':'stage-proof-device',
+      'x-eternal-ticket':ticket2,
+      'x-eternal-stage-proof':'tampered-proof',
+      'x-eternal-execute':'1',
+    }}
+  ),env);
+  assert.equal(response.status,403);
+  assert.match(await response.text(),/Loader ticket invalid or expired/);
 });
 
 test('protected source requires a signed single-use ticket but tolerates IP and UA changes', async () => {

@@ -415,12 +415,10 @@ test('Get Script output is two lines and each script receives its own loader URL
   const second=api.buildLoader('', 'EA-SECOND', guild, {loader_id:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'});
   assert.equal(first.split('\n').length,2);
   assert.match(first,/^script_key="EA-FIRST"\n/);
-  assert.match(first,/game:HttpGet\("https:\/\/auth\.test\/files\/v4\/loaders\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\.lua"\)/);
-  assert.match(first,/type\(loadstring\)~="function"/);
-  assert.match(first,/Voltra Auth loader compile error/);
+  assert.match(first,/^script_key="EA-FIRST"\nloadstring\(game:HttpGet\("https:\/\/auth\.test\/files\/v4\/loaders\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\.lua"\)\)\(\)$/);
   assert.match(second,/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\.lua/);
   assert.notEqual(first,second);
-  assert.doesNotMatch(first,/X-Eternal-Execute|local e=/);
+  assert.doesNotMatch(first,/X-Eternal-Execute|local e=|__ea_src/);
 });
 
 test('FFA non-spy signed reports remain informational', async () => {

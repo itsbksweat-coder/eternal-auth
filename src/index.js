@@ -4463,10 +4463,9 @@ function buildLoader(template, key, guild, script = null) {
   const loaderUrl = script
     ? (loaderUrlForScript(guild, script) || `${String(guild?.base_url || "https://YOUR-WORKER.workers.dev").replace(/\/$/, "")}/files/v4/loaders/LOADER_ID.lua`)
     : (loaderUrlForGuild(guild) || `${String(guild?.base_url || "https://YOUR-WORKER.workers.dev").replace(/\/$/, "")}/files/v4/loaders/LOADER_ID.lua`);
-  // Keep the user-facing result short. The public loader URL returns the
-  // credential-handshake wrapper, so protected headers and HWID checks remain
-  // server-enforced without displaying that wrapper in Discord.
-  return `script_key=${JSON.stringify(key)}\nlocal __ea_src=game:HttpGet(${JSON.stringify(loaderUrl)}); if type(loadstring)~="function" then error("Voltra Auth: loadstring unavailable",0) end; local __ea_fn,__ea_err=loadstring(__ea_src); if type(__ea_fn)~="function" then error("Voltra Auth loader compile error: "..tostring(__ea_err),0) end; __ea_fn()`;
+  // Short, panel-style two-liner. HWID + credential handshake still happens
+  // server-side inside the Lua returned by the loader URL.
+  return `script_key=${JSON.stringify(key)}\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
 }
 
 async function discordApi(env, path, options = {}) {

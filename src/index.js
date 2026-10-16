@@ -1409,16 +1409,10 @@ async function handleProtectedLoader(request, env, ctx) {
   if (!key) return deniedSource("Missing key");
   if (!deviceId) return deniedSource("Missing HWID");
 
-  // Loader rate limit per client IP. Blocks automated scraping of the
-  // obfuscated Lua payload; a legitimate executor fetches at most a few
-  // times a minute.
-  const limit = await rateCheck(env, "loader", clientIp(request), 120, 300);
-  if (!limit.allowed) {
-    return new Response("Rate limited.", {
-      status: 429,
-      headers: { "retry-after": String(limit.retry_after || 60) },
-    });
-  }
+  // No per-IP rate-limit on this path. The loader ticket is HMAC-signed and
+  // single-use (replay-protected by sha256(token) lookup in verifyLoaderTicket),
+  // so each legitimate fetch is cryptographically bounded and automated
+  // scraping gets denied at the ticket step, not after a DO round trip.
 
   // Fast path: hash the license key and HWID in parallel, then fetch the
   // license, blacklist state and requested script in one D1 query.
@@ -1553,10 +1547,12 @@ async function handleProtectedLoader(request, env, ctx) {
     .run();
   if (ctx?.waitUntil) ctx.waitUntil(executionLog); else await executionLog;
 
-  // Per-request Lua obfuscation. Each delivered copy has a unique XOR key
-  // and a watermark derived from the license id, so a leaked payload can be
-  // traced back to a specific user. See src/lua-obfuscator.js.
-  const protectedPayload = await obfuscateForLicense(env, script.content, row.id);
+  // Per-license obfuscated Lua. The watermark is unique per license id so
+  // a leaked copy identifies the user; the heavy transform is cached per
+  // (script, updated_at, license) in-isolate so hot path hits are O(copy).
+  const protectedPayload = await obfuscateForLicense(
+    env, script.content, row.id, script.id, script.ea_script_updated_at || script.updated_at,
+  );
 
   return new Response(protectedPayload, {
     status: 200,
@@ -1570,18 +1566,51 @@ async function handleProtectedLoader(request, env, ctx) {
   });
 }
 
-async function obfuscateForLicense(env, source, licenseId) {
+// Per-isolate cache of obfuscated Lua, keyed by (scriptId, scriptUpdatedAt,
+// licenseId). The watermark is still unique per license (so leaked copies
+// identify the user) but the expensive tokenize/encrypt/minify pass only
+// runs on cache miss. TTL is a safety floor; stale script content naturally
+// invalidates because scripts.updated_at bumps on admin edit.
+const OBFUSCATION_CACHE_TTL_MS = 10 * 60 * 1000;
+const OBFUSCATION_CACHE_MAX = 128;
+const obfuscationCache = new Map();
+
+async function obfuscateForLicense(env, source, licenseId, scriptId, scriptUpdatedAt) {
+  const canCache = scriptId != null && licenseId != null;
+  const cacheKey = canCache ? `${scriptId}:${scriptUpdatedAt || 0}:${licenseId}` : null;
+
+  if (cacheKey) {
+    const hit = obfuscationCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) return hit.value;
+    if (hit) obfuscationCache.delete(cacheKey);
+  }
+
+  let watermark = "";
   try {
-    let watermark = "";
     if (env?.CONFIG_SECRET && licenseId != null) {
       const bytes = await hmacBytes(env.CONFIG_SECRET, `license-watermark:${licenseId}`);
       watermark = bytesToHex(bytes.subarray(0, 8));
     }
-    return obfuscateLua(source, { watermark });
+  } catch {}
+
+  let output;
+  try {
+    output = obfuscateLua(source, { watermark });
   } catch (error) {
     console.warn("Lua obfuscation failed, serving raw", error);
-    return source;
+    output = source;
   }
+
+  if (cacheKey) {
+    if (obfuscationCache.size >= OBFUSCATION_CACHE_MAX) {
+      // Evict the oldest entry (insertion-ordered Map).
+      const oldest = obfuscationCache.keys().next().value;
+      if (oldest !== undefined) obfuscationCache.delete(oldest);
+    }
+    obfuscationCache.set(cacheKey, { value: output, expiresAt: Date.now() + OBFUSCATION_CACHE_TTL_MS });
+  }
+
+  return output;
 }
 
 

@@ -1183,6 +1183,19 @@ async function findLicenseForDiscord(env, guildId, discordId) {
     .first();
 }
 
+// Does this Discord user already hold an active license for THIS specific
+// panel? Used to prevent duplicate whitelists per panel while still allowing
+// the same user to be whitelisted on multiple panels in the same project.
+async function findLicenseForDiscordAndPanel(env, guildId, discordId, panelId) {
+  return env.DB.prepare(
+    `SELECT * FROM licenses
+     WHERE guild_id = ? AND discord_id = ? AND panel_id = ? AND status = 'active'
+     ORDER BY created_at DESC LIMIT 1`
+  )
+    .bind(guildId, discordId, panelId)
+    .first();
+}
+
 async function findAnyLicenseForDiscord(env, guildId, discordId) {
   return env.DB.prepare(
     `SELECT * FROM licenses WHERE guild_id = ? AND discord_id = ? ORDER BY created_at DESC LIMIT 1`
@@ -2957,8 +2970,8 @@ async function handleAdminApi(request, env, url, ctx) {
       return json({ ok: false, error: "That Discord user is blacklisted" }, 409);
     }
     if (discordId) {
-      const existing = await findLicenseForDiscord(env, guildId, discordId);
-      if (existing) return json({ ok: false, error: "User already has an active license" }, 409);
+      const existing = await findLicenseForDiscordAndPanel(env, guildId, discordId, panel.id);
+      if (existing) return json({ ok: false, error: "User already has an active license for this panel" }, 409);
     }
 
     const license = await createLicense(env, { guildId, discordId, panelId: panel.id, days, note });
@@ -3831,7 +3844,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     const panel = await getPanel(env, guildId, cleanText(opts.panel, 128));
     if (!panel?.script_id) return discordMessage("Select an active panel linked to a script.");
     if (await isBlacklisted(env, guildId, target)) return discordMessage("That user is blacklisted.");
-    if (await findLicenseForDiscord(env, guildId, target)) return discordMessage("That user already has an active license.");
+    if (await findLicenseForDiscordAndPanel(env, guildId, target, panel.id)) return discordMessage(`That user already has an active license for **${panel.name}**.`);
 
     const license = await createLicense(env, { guildId, discordId: target, panelId: panel.id, days, note });
     const panelGuild = guildForPanel(guild, panel);

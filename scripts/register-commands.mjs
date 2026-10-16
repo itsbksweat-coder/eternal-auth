@@ -50,9 +50,10 @@ const commands = [
   },
   {
     name: "unwhitelist",
-    description: "Remove a Discord user's Voltra Auth access",
+    description: "Remove a Discord user's Voltra Auth access from a specific panel",
     options: [
       { name: "user", description: "User to unwhitelist", type: USER, required: true },
+      { name: "panel", description: "Panel to remove them from", type: STRING, required: true, autocomplete: true },
     ],
   },
   {

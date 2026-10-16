@@ -2757,11 +2757,14 @@ async function handleAdminApi(request, env, url, ctx) {
     const current = await currentResponse.json();
     const allowed = ["type", "name", "name_localizations", "description", "description_localizations", "options", "default_member_permissions", "dm_permission", "nsfw", "integration_types", "contexts"];
     const commands = current.map((command) => Object.fromEntries(allowed.filter((key) => command[key] !== undefined).map((key) => [key, command[key]])));
-    const whitelist = commands.find((command) => command.name === "whitelist");
-    if (!whitelist) return json({ ok: false, error: "The Discord /whitelist command is not registered" }, 404);
-    whitelist.options = (whitelist.options || []).filter((option) => option.name !== "panel");
-    const userIndex = whitelist.options.findIndex((option) => option.name === "user");
-    whitelist.options.splice(userIndex >= 0 ? userIndex + 1 : 0, 0, { name: "panel", description: "Panel this license can access", type: 3, required: true, autocomplete: true });
+    for (const commandName of ["whitelist", "unwhitelist"]) {
+      const target = commands.find((command) => command.name === commandName);
+      if (!target) return json({ ok: false, error: `The Discord /${commandName} command is not registered` }, 404);
+      target.options = (target.options || []).filter((option) => option.name !== "panel");
+      const userIndex = target.options.findIndex((option) => option.name === "user");
+      const description = commandName === "whitelist" ? "Panel this license can access" : "Panel to remove them from";
+      target.options.splice(userIndex >= 0 ? userIndex + 1 : 0, 0, { name: "panel", description, type: 3, required: true, autocomplete: true });
+    }
     const updateResponse = await fetch(endpoint, { method: "PUT", headers, body: JSON.stringify(commands) });
     if (!updateResponse.ok) return json({ ok: false, error: `Discord command update failed (${updateResponse.status})` }, 502);
     const updated = await updateResponse.json();
@@ -3618,7 +3621,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     const guildId = interaction.guild_id;
     const command = interaction.data?.name;
     const focused = (interaction.data?.options || []).find((option) => option.focused);
-    if (command !== "whitelist" || focused?.name !== "panel" || !guildId) return discordJsonResponse({ type: 8, data: { choices: [] } });
+    if ((command !== "whitelist" && command !== "unwhitelist") || focused?.name !== "panel" || !guildId) return discordJsonResponse({ type: 8, data: { choices: [] } });
     const query = String(focused.value || "").toLowerCase();
     const panels = await env.DB.prepare("SELECT id, name FROM panels WHERE guild_id = ? AND active = 1 AND script_id IS NOT NULL ORDER BY created_at DESC LIMIT 25").bind(guildId).all();
     const choices = (panels.results || [])
@@ -3858,13 +3861,19 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
   if (name === "unwhitelist") {
     if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
     const target = cleanText(opts.user, 64);
-    const result = await env.DB.prepare("DELETE FROM licenses WHERE guild_id = ? AND discord_id = ?")
-      .bind(guildId, target)
+    const panel = await getPanel(env, guildId, cleanText(opts.panel, 128));
+    if (!panel) return discordMessage("Select a panel to remove the user from.");
+    const result = await env.DB.prepare("DELETE FROM licenses WHERE guild_id = ? AND discord_id = ? AND panel_id = ?")
+      .bind(guildId, target, panel.id)
       .run();
-    ctx.waitUntil(removeBuyerRole(env, guild, target));
-    await audit(env, guildId, "discord.unwhitelist", userId, target, { deleted: result.meta?.changes || 0 });
-    ctx.waitUntil(sendLog(env, guild, `🗑️ Unwhitelisted <@${target}>.`));
-    return discordMessage(`✅ Unwhitelisted <@${target}>.`);
+    const deleted = result.meta?.changes || 0;
+    if (!deleted) return discordMessage(`<@${target}> had no active license on **${panel.name}**.`);
+    // Only strip the buyer role if the user has no remaining licenses in this project.
+    const remaining = await findLicenseForDiscord(env, guildId, target);
+    if (!remaining) ctx.waitUntil(removeBuyerRole(env, guildForPanel(guild, panel), target));
+    await audit(env, guildId, "discord.unwhitelist", userId, target, { deleted, panel_id: panel.id });
+    ctx.waitUntil(sendLog(env, guild, `🗑️ Unwhitelisted <@${target}> from panel **${panel.name}**.`));
+    return discordMessage(`✅ Unwhitelisted <@${target}> from **${panel.name}**.`);
   }
 
   if (name === "blacklist") {

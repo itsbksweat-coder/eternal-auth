@@ -1,4 +1,4 @@
-import { authenticatedLauncher, ffaLauncher } from "../public/entry-loader.js";
+import { authenticatedLauncher, ffaLauncher, ffaBootstrapLua } from "../public/entry-loader.js";
 import { DurableObject } from "cloudflare:workers";
 import { DmResponder } from "./dm-responder.js";
 import { deviceBlocked, bindDevice, hwidCooldownSeconds } from "./device-security.js";
@@ -1811,7 +1811,7 @@ async function handlePublicLoader(request, env, loaderId, ctx) {
 async function handleFfaPublicLoader(request, env, loaderId) {
   const { deviceId } = sourceCredentials(request);
   const cleanUrl = `${new URL(request.url).origin}/files/v4/ffa/${loaderId}.lua`;
-  if (!deviceId) return new Response(ffaLauncher(cleanUrl), {
+  if (!deviceId) return new Response(ffaBootstrapLua(cleanUrl), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
   });
@@ -1826,7 +1826,7 @@ async function handleFfaPublicLoader(request, env, loaderId) {
   // FFA requests have no account secret. Require the execution-only launcher
   // marker, but do not trust a caller-supplied raw HWID enough to blacklist it
   // until the signed in-runtime report proof is available.
-  if (!hasLoaderExecutionIntent(request)) return new Response(ffaLauncher(cleanUrl), {
+  if (!hasLoaderExecutionIntent(request)) return new Response(ffaBootstrapLua(cleanUrl), {
     status: 200,
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "private, no-store, max-age=0", "x-content-type-options": "nosniff" },
   });

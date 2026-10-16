@@ -399,7 +399,18 @@ if type(fn)~="function" then error("Voltra Auth loader compile error: "..tostrin
 fn()`;
 }
 
+// ffaLauncher is what end users copy and paste into their executor.
+// Deliberately a one-liner: the server endpoint it points to serves the full
+// HWID-collection bootstrap below.
 export function ffaLauncher(url) {
+  return `loadstring(game:HttpGet(${JSON.stringify(url)}))()`;
+}
+
+// ffaBootstrapLua is what the server returns from /files/v4/ffa/{id}.lua when
+// the request doesn't yet carry an HWID header. It collects/persists an HWID
+// and re-fetches the same URL with the X-Eternal-Device header so the server
+// can serve the protected source.
+export function ffaBootstrapLua(url) {
   return `-- Voltra Auth FFA loader (no key required)
 local h=game:GetService("HttpService")
 local function stop(msg)

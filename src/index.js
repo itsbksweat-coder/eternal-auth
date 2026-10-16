@@ -3155,7 +3155,7 @@ async function handleAdminApi(request, env, url, ctx) {
     const guildId = cleanText(url.searchParams.get("guild_id"), 64);
     if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
     const result = await env.DB.prepare(
-      `SELECT id, guild_id, name, channel_id, manager_role_id, buyer_role_id, active, created_by, created_at, updated_at
+      `SELECT id, guild_id, name, channel_id, manager_role_id, buyer_role_id, script_id, active, created_by, created_at, updated_at
        FROM panels WHERE guild_id = ? ORDER BY created_at DESC LIMIT 250`
     ).bind(guildId).all();
     return json({ ok: true, panels: result.results || [] });

@@ -132,6 +132,14 @@
             </article>
           </div>
 
+          <article class="card panel-card">
+            <div class="section-head">
+              <div><span class="eyebrow">DISCORD</span><h3>Slash commands</h3></div>
+              <button id="syncDiscordCommands" class="primary" type="button">Sync commands</button>
+            </div>
+            <p class="muted">Re-register every slash command with Discord from the current Worker definitions. Use this after an update that changes a command's options (e.g. the new <code>panel</code> option on <code>/whitelist</code> and <code>/unwhitelist</code>, or the <code>All panels</code> choice on <code>/unwhitelist</code>).</p>
+          </article>
+
         </section>
 
         <section class="tabpane hidden" data-pane="serverkeys">
@@ -160,7 +168,7 @@
           <div class="grid two">
             <article class="card panel-card">
               <span class="eyebrow">MANAGER ACTION</span><h3>Whitelist user</h3>
-              <form id="whitelistForm" class="stack compact"><input id="wlDiscord" placeholder="Discord user ID" required /><select id="wlPanel" required><option value="">Select panel</option></select><input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" /><input id="wlNote" placeholder="Note (optional)" /><button class="primary" type="submit">Whitelist</button><button class="ghost" id="syncDiscordCommands" type="button">Sync Discord panel option</button></form>
+              <form id="whitelistForm" class="stack compact"><input id="wlDiscord" placeholder="Discord user ID" required /><select id="wlPanel" required><option value="">Select panel</option></select><input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" /><input id="wlNote" placeholder="Note (optional)" /><button class="primary" type="submit">Whitelist</button></form>
             </article>
             <article class="card panel-card"><span class="eyebrow">PROJECT ACTION</span><h3>Compensate users</h3><form id="compensateForm" class="stack compact"><input id="compDays" type="number" min="1" max="3650" placeholder="Days to add" required /><button class="ghost" type="submit">Add days to timed keys</button></form></article>
           </div>

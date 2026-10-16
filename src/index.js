@@ -2752,21 +2752,15 @@ async function handleAdminApi(request, env, url, ctx) {
     if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_BOT_TOKEN) return json({ ok: false, error: "Discord application secrets are not configured" }, 503);
     const endpoint = `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/commands`;
     const headers = { authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "content-type": "application/json" };
-    const currentResponse = await fetch(endpoint, { headers });
-    if (!currentResponse.ok) return json({ ok: false, error: `Discord command read failed (${currentResponse.status})` }, 502);
-    const current = await currentResponse.json();
-    const allowed = ["type", "name", "name_localizations", "description", "description_localizations", "options", "default_member_permissions", "dm_permission", "nsfw", "integration_types", "contexts"];
-    const commands = current.map((command) => Object.fromEntries(allowed.filter((key) => command[key] !== undefined).map((key) => [key, command[key]])));
-    for (const commandName of ["whitelist", "unwhitelist"]) {
-      const target = commands.find((command) => command.name === commandName);
-      if (!target) return json({ ok: false, error: `The Discord /${commandName} command is not registered` }, 404);
-      target.options = (target.options || []).filter((option) => option.name !== "panel");
-      const userIndex = target.options.findIndex((option) => option.name === "user");
-      const description = commandName === "whitelist" ? "Panel this license can access" : "Panel to remove them from";
-      target.options.splice(userIndex >= 0 ? userIndex + 1 : 0, 0, { name: "panel", description, type: 3, required: true, autocomplete: true });
-    }
+    // Full authoritative command list. A PUT with this body wipes and
+    // replaces every global command, so the signature is always in sync
+    // with the Worker code, never partially migrated from a previous version.
+    const commands = voltraAuthDiscordCommands();
     const updateResponse = await fetch(endpoint, { method: "PUT", headers, body: JSON.stringify(commands) });
-    if (!updateResponse.ok) return json({ ok: false, error: `Discord command update failed (${updateResponse.status})` }, 502);
+    if (!updateResponse.ok) {
+      const errText = await updateResponse.text().catch(() => "");
+      return json({ ok: false, error: `Discord command update failed (${updateResponse.status}): ${errText.slice(0, 240)}` }, 502);
+    }
     const updated = await updateResponse.json();
     return json({ ok: true, commands: updated.length });
   }
@@ -3624,10 +3618,15 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     if ((command !== "whitelist" && command !== "unwhitelist") || focused?.name !== "panel" || !guildId) return discordJsonResponse({ type: 8, data: { choices: [] } });
     const query = String(focused.value || "").toLowerCase();
     const panels = await env.DB.prepare("SELECT id, name FROM panels WHERE guild_id = ? AND active = 1 AND script_id IS NOT NULL ORDER BY created_at DESC LIMIT 25").bind(guildId).all();
-    const choices = (panels.results || [])
+    const panelChoices = (panels.results || [])
       .filter((panel) => !query || String(panel.name || "").toLowerCase().includes(query) || String(panel.id).toLowerCase().includes(query))
-      .slice(0, 25)
+      .slice(0, command === "unwhitelist" ? 24 : 25)
       .map((panel) => ({ name: String(panel.name || "Voltra Auth Panel").slice(0, 100), value: String(panel.id) }));
+    // /unwhitelist gets an extra "All panels" choice that nukes every license
+    // the user holds in this project in one call.
+    const choices = command === "unwhitelist" && (!query || "all panels".includes(query) || "all".includes(query))
+      ? [{ name: "All panels", value: "*" }, ...panelChoices]
+      : panelChoices;
     return discordJsonResponse({ type: 8, data: { choices } });
   }
 
@@ -3861,7 +3860,23 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
   if (name === "unwhitelist") {
     if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
     const target = cleanText(opts.user, 64);
-    const panel = await getPanel(env, guildId, cleanText(opts.panel, 128));
+    const panelRaw = cleanText(opts.panel, 128);
+    if (!panelRaw) return discordMessage("Select a panel to remove the user from.");
+
+    // "*" means wipe every panel for this user in this project.
+    if (panelRaw === "*") {
+      const result = await env.DB.prepare("DELETE FROM licenses WHERE guild_id = ? AND discord_id = ?")
+        .bind(guildId, target)
+        .run();
+      const deleted = result.meta?.changes || 0;
+      if (!deleted) return discordMessage(`<@${target}> had no active licenses in this project.`);
+      ctx.waitUntil(removeBuyerRole(env, guild, target));
+      await audit(env, guildId, "discord.unwhitelist", userId, target, { deleted, panel_id: "all" });
+      ctx.waitUntil(sendLog(env, guild, `🗑️ Unwhitelisted <@${target}> from **all panels** (${deleted} license(s)).`));
+      return discordMessage(`✅ Unwhitelisted <@${target}> from **all panels** (${deleted} license(s)).`);
+    }
+
+    const panel = await getPanel(env, guildId, panelRaw);
     if (!panel) return discordMessage("Select a panel to remove the user from.");
     const result = await env.DB.prepare("DELETE FROM licenses WHERE guild_id = ? AND discord_id = ? AND panel_id = ?")
       .bind(guildId, target, panel.id)
@@ -4479,6 +4494,61 @@ ${ffaLauncher(loaderUrl)}
 
 function defaultLoaderTemplate() {
   return `script_key = "{{KEY}}"\nloadstring(game:HttpGet("{{LOADER_URL}}"))()`;
+}
+
+// Authoritative Discord slash-command definitions used by the dashboard's
+// "Sync commands" button. Keep in sync with scripts/register-commands.mjs.
+function voltraAuthDiscordCommands() {
+  const USER = 6, ROLE = 8, STRING = 3, INTEGER = 4, ATTACHMENT = 11;
+  return [
+    { name: "login", description: "Link Voltra Auth to this Discord server", options: [
+      { name: "key", description: "One-time Voltra Auth server key created by the owner", type: STRING, required: true },
+    ]},
+    { name: "logout", description: "Log Voltra Auth out of this server" },
+    { name: "setpanel", description: "Sends the control panel message in this channel", options: [
+      { name: "loader_script", description: "Upload the loader script file used by this panel", type: ATTACHMENT, required: true },
+      { name: "manager_role", description: "Role allowed to use manager commands", type: ROLE, required: true },
+      { name: "buyer_role", description: "Role to give users after redeeming or being whitelisted", type: ROLE, required: true },
+    ]},
+    { name: "setlogs", description: "Set the Discord webhook used for Voltra Auth logs", options: [
+      { name: "webhook", description: "Discord webhook URL, or 'off' to disable logs", type: STRING, required: true },
+    ]},
+    { name: "whitelist", description: "Whitelist a Discord user", options: [
+      { name: "user", description: "User to whitelist", type: USER, required: true },
+      { name: "panel", description: "Panel this license can access", type: STRING, required: true, autocomplete: true },
+      { name: "days", description: "Days of access; omit for lifetime", type: INTEGER, required: false, min_value: 1 },
+    ]},
+    { name: "unwhitelist", description: "Remove a Discord user's Voltra Auth access", options: [
+      { name: "user", description: "User to unwhitelist", type: USER, required: true },
+      { name: "panel", description: "Panel to remove them from (choose All to wipe every panel)", type: STRING, required: true, autocomplete: true },
+    ]},
+    { name: "blacklist", description: "Blacklist a Discord user from the project", options: [
+      { name: "user", description: "User to blacklist", type: USER, required: true },
+      { name: "reason", description: "Reason shown to the user", type: STRING, required: false },
+      { name: "days", description: "Blacklist duration; omit for indefinite", type: INTEGER, required: false, min_value: 1 },
+    ]},
+    { name: "compensate", description: "Add days to every non-lifetime key", options: [
+      { name: "days", description: "Number of days to add", type: INTEGER, required: true, min_value: 1, max_value: 3650 },
+    ]},
+    { name: "force-resethwid", description: "Reset a user's HWID while ignoring the cooldown", options: [
+      { name: "user", description: "User whose HWID should be reset", type: USER, required: true },
+    ]},
+    { name: "mass-whitelist", description: "Whitelist members who have a specific Discord role", options: [
+      { name: "role", description: "Role whose members should be whitelisted", type: ROLE, required: true },
+      { name: "days", description: "Days of access; omit for lifetime", type: INTEGER, required: false, min_value: 1 },
+    ]},
+    { name: "clean", description: "Clean the server of bannable members in batches of 50", default_member_permissions: null, contexts: [0], integration_types: [0] },
+    { name: "redeem", description: "Redeem an unclaimed Voltra Auth key", options: [
+      { name: "key", description: "Voltra Auth key", type: STRING, required: true },
+    ]},
+    { name: "resethwid", description: "Reset the HWID linked to your Voltra Auth key" },
+    { name: "script", description: "Get your personal Voltra Auth loader" },
+    { name: "ffa", description: "Get a keyless FFA loader when enabled", options: [
+      { name: "script", description: "Script name; omit when only one FFA script is enabled", type: STRING, required: false },
+    ]},
+    { name: "getrole", description: "Restore your configured buyer role" },
+    { name: "stats", description: "Show Voltra Auth project statistics" },
+  ];
 }
 
 function buildLoader(template, key, guild, script = null) {

@@ -4526,17 +4526,11 @@ async function dmLoader(env, guild, userId, key, origin, panel = null) {
   let content;
   if (scripts.length === 1) {
     const loader = buildLoader(guild.loader_template || defaultLoaderTemplate(), key, guild, scripts[0]);
-    content = loader.length <= 1800
-      ? `You were whitelisted for **Voltra Auth**.
-
-**${scripts[0].name}**
-
-\`\`\`lua
-${loader}
-\`\`\``
-      : `You were whitelisted for **Voltra Auth**. Your key is \`${key}\`. Use \`/script\` in the server to retrieve your loader.`;
+    content = loader.length <= 1900
+      ? `\`\`\`lua\n${loader}\n\`\`\``
+      : `\`${key}\``;
   } else {
-    content = `You were whitelisted for **Voltra Auth**. Your key is \`${key}\`. This project has **${scripts.length}** scripts. Use \`/script\` or **Get Script** to choose one.`;
+    content = `\`${key}\``;
   }
 
   return !!(await discordApi(env, `/channels/${dm.id}/messages`, {

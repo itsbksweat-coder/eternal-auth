@@ -135,9 +135,13 @@
           <article class="card panel-card">
             <div class="section-head">
               <div><span class="eyebrow">DISCORD</span><h3>Slash commands</h3></div>
-              <button id="syncDiscordCommands" class="primary" type="button">Sync commands</button>
+              <div class="actions">
+                <button id="syncDiscordCommands" class="primary" type="button">Sync commands</button>
+                <button id="resyncPanels" class="ghost" type="button">All</button>
+              </div>
             </div>
-            <p class="muted">Re-register every slash command with Discord from the current Worker definitions. Use this after an update that changes a command's options (e.g. the new <code>panel</code> option on <code>/whitelist</code> and <code>/unwhitelist</code>, or the <code>All panels</code> choice on <code>/unwhitelist</code>).</p>
+            <p class="muted"><b>Sync commands</b> — re-register every slash command with Discord from the current Worker definitions. Use after a Worker update changes a command's options.</p>
+            <p class="muted"><b>All</b> — resend every active panel in the loaded project to its original channel with the latest buttons and embed. Use after a panel's buttons stop working or the message got deleted.</p>
           </article>
 
         </section>

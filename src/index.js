@@ -2748,6 +2748,51 @@ async function saveAdminState(env, body) {
 }
 
 async function handleAdminApi(request, env, url, ctx) {
+  if (url.pathname === "/api/admin/discord/resync-panels" && request.method === "POST") {
+    if (!env.DISCORD_BOT_TOKEN) return json({ ok: false, error: "DISCORD_BOT_TOKEN is not configured" }, 503);
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+
+    const result = await env.DB.prepare(
+      `SELECT id, name, channel_id, embed_title, embed_description, embed_color, created_at, updated_at, script_id
+       FROM panels WHERE guild_id = ? AND active = 1 AND channel_id IS NOT NULL`
+    ).bind(guildId).all();
+    const panels = result.results || [];
+    if (!panels.length) return json({ ok: true, resent: 0, failed: 0, panels: [] });
+
+    let resent = 0;
+    const failed = [];
+    for (const panel of panels) {
+      const title = String(panel.embed_title || panel.name || "Voltra Auth").slice(0, 256);
+      const description = String(panel.embed_description || "Click a button below to use this panel.").slice(0, 4000);
+      const color = Number(panel.embed_color) || 0x4169ff;
+      const timestamp = Number(panel.updated_at || panel.created_at || now()) * 1000;
+      const sent = await discordApi(env, `/channels/${panel.channel_id}/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          embeds: [{
+            title,
+            description,
+            color,
+            footer: { text: "Resynced from the Voltra Auth dashboard" },
+            timestamp: new Date(timestamp).toISOString(),
+          }],
+          components: panelComponents(panel.id),
+          allowed_mentions: { parse: [] },
+        }),
+      });
+      if (!sent?.id) {
+        failed.push({ id: panel.id, name: panel.name, channel_id: panel.channel_id });
+        continue;
+      }
+      await env.DB.prepare("UPDATE panels SET message_id = ?, updated_at = ? WHERE id = ?")
+        .bind(sent.id, now(), panel.id).run().catch(() => {});
+      resent += 1;
+    }
+    return json({ ok: true, resent, failed: failed.length, failures: failed });
+  }
+
   if (url.pathname === "/api/admin/discord/sync-commands" && request.method === "POST") {
     if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_BOT_TOKEN) return json({ ok: false, error: "Discord application secrets are not configured" }, 503);
     const endpoint = `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/commands`;

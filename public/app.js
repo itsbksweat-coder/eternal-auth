@@ -463,7 +463,19 @@ $("#whitelistForm").addEventListener("submit", async (e) => {
 $("#syncDiscordCommands").onclick = async () => {
   try {
     const data = await api("/api/admin/discord/sync-commands", { method: "POST", body: "{}" });
-    msg(`Discord commands synced (${data.commands}). The panel option is now available.`, "success");
+    msg(`Discord commands synced (${data.commands}).`, "success");
+  } catch (err) { msg(err.message, "error"); }
+};
+
+const resyncPanelsBtn = $("#resyncPanels");
+if (resyncPanelsBtn) resyncPanelsBtn.onclick = async () => {
+  const gid = $("#guildId").value.trim();
+  if (!gid) return msg("Load a project first.", "error");
+  try {
+    const data = await api("/api/admin/discord/resync-panels", { method: "POST", body: JSON.stringify({ guild_id: gid }) });
+    const parts = [`${data.resent} panel(s) resent`];
+    if (data.failed) parts.push(`${data.failed} failed`);
+    msg(parts.join(", ") + ".", data.failed ? "error" : "success");
   } catch (err) { msg(err.message, "error"); }
 };
 

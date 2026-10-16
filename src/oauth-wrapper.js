@@ -100,7 +100,7 @@ async function discordBotApi(env, path, options = {}) {
   }
   const headers = new Headers(options.headers || {});
   headers.set("authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
-  headers.set("user-agent", "EternalAuth-ServerCleanup/1.0");
+  headers.set("user-agent", "VoltraAuth-ServerCleanup/1.0");
   if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   return fetch(`${DISCORD_API}${path}`, { ...options, headers });
 }
@@ -117,19 +117,19 @@ async function executeModeration(request, env, action) {
     return json({ ok: false, error: "Enter a valid Discord user ID." }, 400);
   }
   if (action === "ban" && userId === DASHBOARD_OWNER_ID) {
-    return json({ ok: false, error: "The Eternal Auth owner account is protected from dashboard bans." }, 400);
+    return json({ ok: false, error: "The Voltra Auth owner account is protected from dashboard bans." }, 400);
   }
 
   const path = `/guilds/${guildId}/bans/${userId}`;
   const options = action === "ban"
     ? {
         method: "PUT",
-        headers: { "x-audit-log-reason": "Eternal Auth dashboard ban" },
+        headers: { "x-audit-log-reason": "Voltra Auth dashboard ban" },
         body: JSON.stringify({ delete_message_seconds: 0 }),
       }
     : {
         method: "DELETE",
-        headers: { "x-audit-log-reason": "Eternal Auth dashboard unban" },
+        headers: { "x-audit-log-reason": "Voltra Auth dashboard unban" },
       };
 
   const response = await discordBotApi(env, path, options);
@@ -138,7 +138,7 @@ async function executeModeration(request, env, action) {
     const detail = data?.message ? `: ${data.message}` : "";
     return json({
       ok: false,
-      error: `Discord HTTP ${response.status}${detail}. Make sure Eternal Auth has Ban Members permission and its role is high enough.`,
+      error: `Discord HTTP ${response.status}${detail}. Make sure Voltra Auth has Ban Members permission and its role is high enough.`,
     }, response.status >= 400 && response.status < 500 ? response.status : 502);
   }
 
@@ -382,7 +382,7 @@ async function finishOAuth(request, env) {
   }
 
   // We deliberately do not persist Discord's user access/refresh token. ODY gets
-  // only an opaque Eternal Auth session token for its own backend requests.
+  // only an opaque Voltra Auth session token for its own backend requests.
   const appToken = randomHex(32);
   const sessionExpiresAt = unixNow() + SESSION_TTL_SECONDS;
   await Promise.all([
@@ -466,7 +466,7 @@ async function odyStatus(request, env) {
   const response = await fetch(`${DISCORD_API}/channels/${ODY_CHANNEL_ID}/messages?limit=50`, {
     headers: {
       authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-      "user-agent": "EternalAuth-ODY/1.0",
+      "user-agent": "VoltraAuth-ODY/1.0",
     },
   });
   const messages = await response.json().catch(() => null);

@@ -18,7 +18,7 @@ function sleep(ms) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-PrefixClean/1.0",
+    "user-agent": "VoltraAuth-PrefixClean/1.0",
     ...extra,
   };
 }
@@ -77,7 +77,7 @@ async function getGuildAndBot(env) {
     throw new Error(guild?.message || `Could not load target server (HTTP ${guildResult.response.status}).`);
   }
   if (!botResult.response.ok || !bot?.id) {
-    throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+    throw new Error(bot?.message || `Could not identify Voltra Auth (HTTP ${botResult.response.status}).`);
   }
 
   const botMemberResult = await discordJson(
@@ -86,7 +86,7 @@ async function getGuildAndBot(env) {
     { method: "GET" },
   );
   if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
-    throw new Error(`Could not read Eternal Auth's member record (HTTP ${botMemberResult.response.status}).`);
+    throw new Error(`Could not read Voltra Auth's member record (HTTP ${botMemberResult.response.status}).`);
   }
 
   return { guild, bot, botMember: botMemberResult.data };
@@ -103,7 +103,7 @@ function assertBotPermissions(guild, botMember, requireManage = false) {
       !canBan ? "Ban Members" : null,
       requireManage && !canManage ? "Manage Server" : null,
     ].filter(Boolean).join(" + ");
-    throw new Error(`Eternal Auth is missing ${missing} in ${guild.name || TARGET_GUILD_ID}.`);
+    throw new Error(`Voltra Auth is missing ${missing} in ${guild.name || TARGET_GUILD_ID}.`);
   }
 }
 
@@ -164,7 +164,7 @@ async function runGuildMassban(env, actorId) {
       const batch = targets.slice(offset, offset + BATCH_SIZE);
       batches += 1;
 
-      const reason = encodeURIComponent(`Eternal Auth .b by ${actorId}`.slice(0, 480));
+      const reason = encodeURIComponent(`Voltra Auth .b by ${actorId}`.slice(0, 480));
       const { response, data } = await discordJson(
         env,
         `/guilds/${encodeURIComponent(TARGET_GUILD_ID)}/bulk-ban`,
@@ -217,7 +217,7 @@ async function runSingleBan(env, actorId, targetUserId) {
     throw new Error("That user cannot be banned by this command.");
   }
 
-  const reason = encodeURIComponent(`Eternal Auth .b ${targetUserId} by ${actorId}`.slice(0, 480));
+  const reason = encodeURIComponent(`Voltra Auth .b ${targetUserId} by ${actorId}`.slice(0, 480));
   const { response, data } = await discordJson(
     env,
     `/guilds/${encodeURIComponent(TARGET_GUILD_ID)}/bans/${encodeURIComponent(targetUserId)}`,
@@ -286,12 +286,12 @@ export class EternalGateway extends BaseEternalGateway {
         intents: 1 | (1 << 9) | (1 << 12) | (1 << 15),
         properties: {
           os: "linux",
-          browser: "Eternal Auth",
-          device: "Eternal Auth",
+          browser: "Voltra Auth",
+          device: "Voltra Auth",
         },
         presence: {
           since: null,
-          activities: [{ name: "Eternal Auth", type: 3 }],
+          activities: [{ name: "Voltra Auth", type: 3 }],
           status: "online",
           afk: false,
         },

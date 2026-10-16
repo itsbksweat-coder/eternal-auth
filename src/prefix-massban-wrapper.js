@@ -31,7 +31,7 @@ function sleep(ms) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-PrefixMassban/1.0",
+    "user-agent": "VoltraAuth-PrefixMassban/1.0",
     ...extra,
   };
 }
@@ -96,7 +96,7 @@ async function listGuildMembers(env, guildId) {
     if (!response.ok || !Array.isArray(data)) {
       const detail = data?.message ? `: ${data.message}` : "";
       if (response.status === 403) {
-        throw new Error(`Discord denied the member list${detail}. Enable Server Members Intent for Eternal Auth.`);
+        throw new Error(`Discord denied the member list${detail}. Enable Server Members Intent for Voltra Auth.`);
       }
       throw new Error(`Could not read server members (HTTP ${response.status})${detail}.`);
     }
@@ -132,10 +132,10 @@ async function runGuildMassban(env, guildId, actorId, source = "massban") {
     const bot = botResult.data;
 
     if (!guildResult.response.ok || !guild?.id) {
-      throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Eternal Auth is in that server.`);
+      throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Voltra Auth is in that server.`);
     }
     if (!botResult.response.ok || !bot?.id) {
-      throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+      throw new Error(bot?.message || `Could not identify Voltra Auth (HTTP ${botResult.response.status}).`);
     }
 
     const botMemberResult = await discordJson(
@@ -147,7 +147,7 @@ async function runGuildMassban(env, guildId, actorId, source = "massban") {
     if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
       throw new Error(
         botMemberResult.data?.message
-          || `Could not read Eternal Auth's member record (HTTP ${botMemberResult.response.status}).`,
+          || `Could not read Voltra Auth's member record (HTTP ${botMemberResult.response.status}).`,
       );
     }
 
@@ -161,7 +161,7 @@ async function runGuildMassban(env, guildId, actorId, source = "massban") {
         !canBan ? "Ban Members" : null,
         !canManage ? "Manage Server" : null,
       ].filter(Boolean).join(" + ");
-      throw new Error(`Eternal Auth is missing ${missing} in ${guild.name || guildId}.`);
+      throw new Error(`Voltra Auth is missing ${missing} in ${guild.name || guildId}.`);
     }
 
     const members = await listGuildMembers(env, guildId);
@@ -189,7 +189,7 @@ async function runGuildMassban(env, guildId, actorId, source = "massban") {
       batches += 1;
 
       const reason = encodeURIComponent(
-        `Eternal Auth ${source} by ${actorId || "dashboard"}`.slice(0, 480),
+        `Voltra Auth ${source} by ${actorId || "dashboard"}`.slice(0, 480),
       );
 
       const { response, data } = await discordJson(
@@ -208,7 +208,7 @@ async function runGuildMassban(env, guildId, actorId, source = "massban") {
       if (!response.ok) {
         const detail = data?.message ? `: ${data.message}` : "";
         if (response.status === 403) {
-          throw new Error(`Discord rejected batch ${batches}${detail}. Check Ban Members + Manage Server and Eternal Auth's role position.`);
+          throw new Error(`Discord rejected batch ${batches}${detail}. Check Ban Members + Manage Server and Voltra Auth's role position.`);
         }
         if (Number(data?.code) === 500000 || String(data?.message || "").toLowerCase().includes("failed to ban users")) {
           failed += batch.length;
@@ -368,7 +368,7 @@ async function maybeHandleDashboardMassban(request, env, ctx) {
   if (url.pathname !== "/api/admin/server-cleanup" || request.method !== "POST") return null;
 
   if (!await dashboardAuthorized(request, env, ctx)) {
-    return json({ ok: false, error: "Sign in to Eternal Auth first." }, 401);
+    return json({ ok: false, error: "Sign in to Voltra Auth first." }, 401);
   }
 
   let body = {};
@@ -514,12 +514,12 @@ export class EternalGateway extends BaseEternalGateway {
         intents: 1 | (1 << 9) | (1 << 12) | (1 << 15),
         properties: {
           os: "linux",
-          browser: "Eternal Auth",
-          device: "Eternal Auth",
+          browser: "Voltra Auth",
+          device: "Voltra Auth",
         },
         presence: {
           since: null,
-          activities: [{ name: "Eternal Auth", type: 3 }],
+          activities: [{ name: "Voltra Auth", type: 3 }],
           status: "online",
           afk: false,
         },

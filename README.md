@@ -2,7 +2,7 @@
 
 Read **START-HERE.md** for this release, deployment, five-minute resets, DM replies, and the limits of code-exposure detection. Older release notes below describe historical behavior.
 
-# Eternal Auth v1.8.6 — Seven-Layer Leak Guard
+# Voltra Auth v1.8.6 — Seven-Layer Leak Guard
 
 This build adds seven client-side leak-deterrence layers before the protected script is fetched/executed:
 
@@ -22,7 +22,7 @@ No new D1 migration is required when upgrading from v1.8.6.
 
 ---
 
-# Eternal Auth v1.7.4 — Fast Loader
+# Voltra Auth v1.7.4 — Fast Loader
 
 This build keeps the v1.7.x backend and native kick behavior, while optimizing the execution path.
 
@@ -41,9 +41,9 @@ No new D1 migration is required when upgrading from v1.7.3.
 
 ---
 
-# Eternal Auth v1.7.4 — Full Backend Persistence
+# Voltra Auth v1.7.4 — Full Backend Persistence
 
-Cloudflare-hosted Eternal Auth with:
+Cloudflare-hosted Voltra Auth with:
 
 - Cloudflare Worker API + dashboard
 - D1 licenses, server keys, blacklists, logs, and scripts
@@ -58,9 +58,9 @@ Cloudflare-hosted Eternal Auth with:
 
 ## v1.7 backend persistence
 
-Eternal Auth now keeps the dashboard state on the backend instead of relying on browser storage. The D1 database stores project/guild configuration, scripts, licenses, HWID hashes, blacklists, stock keys, server setup-key metadata, audit logs, admin UI state, admin credential hashes, admin sessions, and a persisted Gateway status snapshot. Newly generated server setup keys are additionally encrypted with `CONFIG_SECRET` before being stored so they can be copied again from the admin dashboard without keeping plaintext in D1.
+Voltra Auth now keeps the dashboard state on the backend instead of relying on browser storage. The D1 database stores project/guild configuration, scripts, licenses, HWID hashes, blacklists, stock keys, server setup-key metadata, audit logs, admin UI state, admin credential hashes, admin sessions, and a persisted Gateway status snapshot. Newly generated server setup keys are additionally encrypted with `CONFIG_SECRET` before being stored so they can be copied again from the admin dashboard without keeping plaintext in D1.
 
-The admin password is **not stored in plaintext**. On the first successful login after the v1.7 migration, Eternal Auth uses the existing `ADMIN_PASSWORD` Worker Secret once to create a PBKDF2-SHA256 password hash with a random salt in D1. After that, D1 is the source of truth for admin login. You can change the password from the new **Backend** page.
+The admin password is **not stored in plaintext**. On the first successful login after the v1.7 migration, Voltra Auth uses the existing `ADMIN_PASSWORD` Worker Secret once to create a PBKDF2-SHA256 password hash with a random salt in D1. After that, D1 is the source of truth for admin login. You can change the password from the new **Backend** page.
 
 For an existing v1.6.x database, run:
 
@@ -91,9 +91,9 @@ Each Discord project can now contain as many scripts as you need. Every script h
 - enabled / disabled state
 - protected Lua source
 
-In the dashboard, open **Script** and use **Upload Script Files**. Scripts are file-only: select one or multiple text/script files and one Eternal Auth script is created per file. Replacing protected source also requires uploading a replacement file.
+In the dashboard, open **Script** and use **Upload Script Files**. Scripts are file-only: select one or multiple text/script files and one Voltra Auth script is created per file. Replacing protected source also requires uploading a replacement file.
 
-When a licensed user runs `/script` or presses **Get Script** and there is more than one enabled script, Discord shows a script selector. After they choose one, Eternal Auth sends their personal key with that script's loader URL.
+When a licensed user runs `/script` or presses **Get Script** and there is more than one enabled script, Discord shows a script selector. After they choose one, Voltra Auth sends their personal key with that script's loader URL.
 
 ## Upgrade from v1.5 or older
 
@@ -136,7 +136,7 @@ HWID_PEPPER
 CONFIG_SECRET
 ```
 
-For an existing install, keep `ADMIN_PASSWORD` long enough to complete the first successful v1.7 login. Eternal Auth will hash it into D1; after that it is optional and can be deleted from Worker Secrets.
+For an existing install, keep `ADMIN_PASSWORD` long enough to complete the first successful v1.7 login. Voltra Auth will hash it into D1; after that it is optional and can be deleted from Worker Secrets.
 
 Existing installs may still have `SETUP_KEY`; v1.7 does not rely on it for the one-time server-key flow.
 
@@ -172,7 +172,7 @@ script_key="EA-...";
 loadstring(game:HttpGet("https://YOUR-WORKER.workers.dev/files/v4/loaders/SCRIPT_LOADER_ID.lua"))()
 ```
 
-The selected public loader tells Eternal Auth which protected script to return. The user's license remains project-wide, so the same valid Eternal Auth license can access any enabled script in that Discord project.
+The selected public loader tells Voltra Auth which protected script to return. The user's license remains project-wide, so the same valid Voltra Auth license can access any enabled script in that Discord project.
 
 ## FFA mode
 
@@ -220,12 +220,12 @@ and reproduce the request once. The Worker will log the underlying D1/runtime ex
 
 Every invocation creates a new persistent panel. The newest panel becomes the guild-level default for non-panel commands, while older panels keep their own loader template and roles.
 
-The uploaded loader file should contain `{{KEY}}` and `{{LOADER_URL}}`. Eternal Auth can also normalize a standard `script_key = "KEY"` plus `/files/v4/loaders/...lua` loadstring automatically.
+The uploaded loader file should contain `{{KEY}}` and `{{LOADER_URL}}`. Voltra Auth can also normalize a standard `script_key = "KEY"` plus `/files/v4/loaders/...lua` loadstring automatically.
 
 
 ## v1.8.6 - loadstring-only panels
 
-`/setpanel` loader attachments now only need the actual Eternal Auth loadstring (or bare loader URL). Eternal Auth automatically prepends `script_key="{{KEY}}";` when saving the panel. A panel is pinned to the script identified by that loader URL, so **Get Script** returns that script directly instead of opening the multi-script selector. The web dashboard now displays and copies the full `loadstring(game:HttpGet("..."))()` form rather than a bare loader URL.
+`/setpanel` loader attachments now only need the actual Voltra Auth loadstring (or bare loader URL). Voltra Auth automatically prepends `script_key="{{KEY}}";` when saving the panel. A panel is pinned to the script identified by that loader URL, so **Get Script** returns that script directly instead of opening the multi-script selector. The web dashboard now displays and copies the full `loadstring(game:HttpGet("..."))()` form rather than a bare loader URL.
 
 
 ## v1.8.6 panel flow

@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { hwidCooldownSeconds } from '../src/device-security.js';
 let source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 source = source.replace('import { DurableObject } from "cloudflare:workers";', 'class DurableObject {}');
-for (const file of ['dm-responder.js', 'device-security.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
+for (const file of ['dm-responder.js', 'device-security.js', 'lua-obfuscator.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
 source = source.replace('"../public/entry-loader.js"', JSON.stringify(new URL('../public/entry-loader.js', import.meta.url).href));
 source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource, ensureBackendPersistenceSchema };';
 const api = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
@@ -136,7 +136,7 @@ test('client security reports are informational and never create HWID bans', asy
   const { db, env } = await fixture();
   let response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 200);
-  assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
+  assert.match(await response.text(), /SECRET_PROTECTED_CONTENT/);
 
   response = await api.handleSecurityReport(report({key:'valid-key',device_id:'someone-else',reason:'gui'}), env);
   assert.equal(response.status, 403);
@@ -153,7 +153,7 @@ test('client security reports are informational and never create HWID bans', asy
 
   response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 200);
-  assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
+  assert.match(await response.text(), /SECRET_PROTECTED_CONTENT/);
 });
 
 test('heuristic security reports never create persistent HWID bans', async () => {
@@ -237,7 +237,7 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   const {db,env}=await fixture();
   let response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua'),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,200);
-  assert.match(await response.text(),/Eternal Auth FFA loader/);
+  assert.match(await response.text(),/Voltra Auth FFA loader/);
   response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{'x-eternal-device':'ffa-device','x-eternal-execute':'1'}}),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,200);
   const bootstrap=await response.text();
@@ -340,7 +340,7 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(response.status,200);
   const source=await response.text();
   assert.match(source,/X-Eternal-Execute/);
-  assert.match(source,/Eternal Auth loader compile error/);
+  assert.match(source,/Voltra Auth loader compile error/);
   assert.match(source,/reason="clipboard_source"/);
   assert.match(source,/hookfunction/);
   assert.match(source,/getrenv/);
@@ -362,7 +362,7 @@ test('old automatic HWID bans self-recover on a valid request', async () => {
     db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,?, 'l',0)").run(hash,reason);
     const response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
     assert.equal(response.status,200,reason);
-    assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT',reason);
+    assert.match(await response.text(),/SECRET_PROTECTED_CONTENT/,reason);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0,reason);
     assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'active',reason);
   }
@@ -417,7 +417,7 @@ test('Get Script output is two lines and each script receives its own loader URL
   assert.match(first,/^script_key="EA-FIRST"\n/);
   assert.match(first,/game:HttpGet\("https:\/\/auth\.test\/files\/v4\/loaders\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\.lua"\)/);
   assert.match(first,/type\(loadstring\)~="function"/);
-  assert.match(first,/Eternal Auth loader compile error/);
+  assert.match(first,/Voltra Auth loader compile error/);
   assert.match(second,/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\.lua/);
   assert.notEqual(first,second);
   assert.doesNotMatch(first,/X-Eternal-Execute|local e=/);
@@ -557,7 +557,7 @@ test('protected source requires a signed single-use ticket but tolerates IP and 
 
   response=await api.handleProtectedLoader(protectedRequest(),env);
   assert.equal(response.status,200);
-  assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
+  assert.match(await response.text(),/SECRET_PROTECTED_CONTENT/);
 
   response=await api.handleProtectedLoader(protectedRequest(),env);
   assert.equal(response.status,403);

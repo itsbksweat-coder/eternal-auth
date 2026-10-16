@@ -2,6 +2,7 @@ import { authenticatedLauncher, ffaLauncher } from "../public/entry-loader.js";
 import { DurableObject } from "cloudflare:workers";
 import { DmResponder } from "./dm-responder.js";
 import { deviceBlocked, bindDevice, hwidCooldownSeconds } from "./device-security.js";
+import { obfuscateLua } from "./lua-obfuscator.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -53,7 +54,7 @@ function cachePut(map, key, value, ttl = HOT_CACHE_TTL_MS) {
 }
 function cacheDelete(map, key) { map.delete(key); }
 
-// Eternal Auth v1.4 Free Gateway
+// Voltra Auth v1.4 Free Gateway
 //
 // This single SQLite-backed Durable Object opens one outbound WebSocket to
 // Discord's Gateway using non-privileged GUILDS and DIRECT_MESSAGES intents.
@@ -111,7 +112,7 @@ export class EternalGateway extends DurableObject {
     if (url.pathname === "/reconnect" && request.method === "POST") {
       this.fatal = false;
       this.lastError = null;
-      this.disconnectSocket(4000, "Manual Eternal Auth reconnect");
+      this.disconnectSocket(4000, "Manual Voltra Auth reconnect");
       await this.ensureConnected(true);
       return new Response(JSON.stringify(this.status()), {
         status: 200,
@@ -283,7 +284,7 @@ export class EternalGateway extends DurableObject {
       this.readyAt = Date.now();
       this.reconnectAttempts = 0;
       this.lastError = null;
-      console.log(`Eternal Auth Free Gateway READY as ${this.userTag || this.userId} in ${this.guildIds.size} guild(s).`);
+      console.log(`Voltra Auth Free Gateway READY as ${this.userTag || this.userId} in ${this.guildIds.size} guild(s).`);
       return;
     }
 
@@ -292,7 +293,7 @@ export class EternalGateway extends DurableObject {
       this.readyAt = Date.now();
       this.reconnectAttempts = 0;
       this.lastError = null;
-      console.log("Eternal Auth Free Gateway session resumed.");
+      console.log("Voltra Auth Free Gateway session resumed.");
       return;
     }
 
@@ -314,12 +315,12 @@ export class EternalGateway extends DurableObject {
         intents: 1 | (1 << 12),
         properties: {
           os: "linux",
-          browser: "Eternal Auth",
-          device: "Eternal Auth",
+          browser: "Voltra Auth",
+          device: "Voltra Auth",
         },
         presence: {
           since: null,
-          activities: [{ name: "Eternal Auth", type: 3 }],
+          activities: [{ name: "Voltra Auth", type: 3 }],
           status: "online",
           afk: false,
         },
@@ -380,7 +381,7 @@ export class EternalGateway extends DurableObject {
     const fatalCodes = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
     if (fatalCodes.has(code)) {
       this.fatal = true;
-      console.error(`Eternal Auth Gateway stopped reconnecting after fatal close ${code}.`);
+      console.error(`Voltra Auth Gateway stopped reconnecting after fatal close ${code}.`);
       return;
     }
 
@@ -395,7 +396,7 @@ export class EternalGateway extends DurableObject {
     this.ws = null;
     this.ready = false;
     try {
-      if (old && (old.readyState === 0 || old.readyState === 1)) old.close(4000, "Eternal Auth reconnect");
+      if (old && (old.readyState === 0 || old.readyState === 1)) old.close(4000, "Voltra Auth reconnect");
     } catch {}
     this.scheduleReconnect(delayMs);
   }
@@ -470,9 +471,9 @@ async function ensureGatewayPresence(env) {
 
 async function serveWebsiteAsset(request, env) {
   if (!env?.ASSETS || typeof env.ASSETS.fetch !== "function") {
-    console.error("Eternal Auth ASSETS binding is unavailable");
+    console.error("Voltra Auth ASSETS binding is unavailable");
     return new Response(
-      "<!doctype html><meta charset=\"utf-8\"><title>Eternal Auth</title><h1>Eternal Auth site assets are unavailable.</h1>",
+      "<!doctype html><meta charset=\"utf-8\"><title>Voltra Auth</title><h1>Voltra Auth site assets are unavailable.</h1>",
       {
         status: 503,
         headers: {
@@ -491,7 +492,7 @@ async function serveWebsiteAsset(request, env) {
     const looksLikeFile = /\/[^/]+\.[a-z0-9]{1,12}$/i.test(url.pathname);
 
     // SPA/browser fallback: if a normal page route is not a concrete asset,
-    // serve the real Eternal Auth index instead of surfacing a Worker 500/404.
+    // serve the real Voltra Auth index instead of surfacing a Worker 500/404.
     if (response.status === 404 && wantsHtml && !looksLikeFile) {
       const indexUrl = new URL("/index.html", request.url);
       response = await env.ASSETS.fetch(new Request(indexUrl, {
@@ -502,9 +503,9 @@ async function serveWebsiteAsset(request, env) {
 
     return withSecurityHeaders(response);
   } catch (error) {
-    console.error("Eternal Auth asset serving failed", error);
+    console.error("Voltra Auth asset serving failed", error);
     return new Response(
-      "<!doctype html><meta charset=\"utf-8\"><title>Eternal Auth</title><h1>Eternal Auth website could not load.</h1><p>Please try again in a moment.</p>",
+      "<!doctype html><meta charset=\"utf-8\"><title>Voltra Auth</title><h1>Voltra Auth website could not load.</h1><p>Please try again in a moment.</p>",
       {
         status: 503,
         headers: {
@@ -521,7 +522,7 @@ export default {
     try {
       const url = new URL(request.url);
 
-      // Hide Eternal Auth source/auth pages only when they are opened as a
+      // Hide Voltra Auth source/auth pages only when they are opened as a
       // real browser document. Executor HTTP requests keep their normal behavior.
       if (
         isBrowserNavigation(request) &&
@@ -557,10 +558,26 @@ export default {
       }
 
       if (url.pathname === "/api/v1/security/report" && request.method === "POST") {
+        const limit = await rateCheck(env, "sec-report", clientIp(request), 20, 300);
+        if (!limit.allowed) {
+          return json(
+            { ok: false, error: "Too many reports from this address." },
+            429,
+            { "retry-after": String(limit.retry_after || 60) },
+          );
+        }
         return handleSecurityReport(request, env);
       }
 
       if (url.pathname === "/api/v1/ffa/security/report" && request.method === "POST") {
+        const limit = await rateCheck(env, "sec-report-ffa", clientIp(request), 20, 300);
+        if (!limit.allowed) {
+          return json(
+            { ok: false, error: "Too many reports from this address." },
+            429,
+            { "retry-after": String(limit.retry_after || 60) },
+          );
+        }
         return handleFfaSecurityReport(request, env);
       }
 
@@ -594,6 +611,14 @@ export default {
 
       if (url.pathname === "/api/admin/login" && request.method === "POST") {
         await ensureAdminAuthSchema(env);
+        const limit = await rateCheck(env, "login", clientIp(request), 5, 600);
+        if (!limit.allowed) {
+          return json(
+            { ok: false, error: "Too many login attempts. Try again later." },
+            429,
+            { "retry-after": String(limit.retry_after || 60) },
+          );
+        }
         return handleAdminLogin(request, env);
       }
 
@@ -607,6 +632,21 @@ export default {
           await ensureBackendPersistenceSchema(env);
           const session = await verifyAdminSession(request, env);
           if (!session) return json({ ok: false, error: "Unauthorized" }, 401);
+
+          // Dedicated endpoint for the dashboard JS to pick up its CSRF token
+          // after a page reload (the token lives only in memory client-side).
+          if (url.pathname === "/api/admin/csrf" && request.method === "GET") {
+            return handleAdminCsrf(session);
+          }
+
+          // Any state-changing admin call must carry a matching CSRF header.
+          // GET/HEAD/OPTIONS are read-only and don't need the check.
+          const method = request.method.toUpperCase();
+          if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+            const csrfError = await requireCsrf(request, session);
+            if (csrfError) return csrfError;
+          }
+
           return await handleAdminApi(request, env, url, ctx);
         } catch (error) {
           console.error("Admin API failed", url.pathname, error);
@@ -619,7 +659,7 @@ export default {
         try {
           await ensureBackendPersistenceSchema(env);
           await env.DB.prepare("SELECT 1 AS ok").first();
-          return json({ ok: true, service: "Eternal Auth", backend: "ready" });
+          return json({ ok: true, service: "Voltra Auth", backend: "ready" });
         } catch (error) {
           console.error("Health check failed:", error);
           return json({ ok: false, error: "Backend initialization failed" }, 503);
@@ -643,10 +683,10 @@ export default {
 };
 
 function json(body, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(body), {
+  return withSecurityHeaders(new Response(JSON.stringify(body), {
     status,
     headers: { ...JSON_HEADERS, ...extraHeaders },
-  });
+  }));
 }
 
 function publicJson(body, status = 200) {
@@ -655,16 +695,38 @@ function publicJson(body, status = 200) {
   });
 }
 
+// Strict HTTP security headers.
+// Note: style-src keeps 'unsafe-inline' because the dashboard still uses a few
+// inline width hints (progress bars) and the moderation page has a scoped
+// <style> block. Scripts stay strict ('self' only) and inline event handlers
+// are not used.
+const CSP_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: https://cdn.discordapp.com",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "object-src 'none'",
+  "upgrade-insecure-requests",
+].join("; ");
+
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
+  headers.set("content-security-policy", CSP_POLICY);
+  headers.set("strict-transport-security", "max-age=31536000; includeSubDomains; preload");
   headers.set("x-content-type-options", "nosniff");
   headers.set("x-frame-options", "DENY");
   headers.set("referrer-policy", "no-referrer");
-  headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
   headers.set(
-    "content-security-policy",
-    "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    "permissions-policy",
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
   );
+  headers.set("cross-origin-opener-policy", "same-origin");
+  headers.set("cross-origin-resource-policy", "same-origin");
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -678,6 +740,38 @@ async function readJson(request) {
   } catch {
     return null;
   }
+}
+
+// Rate limiter backed by the primary Gateway Durable Object. All Worker
+// requests target one DO instance, so this is a single global counter per key.
+// Returns { allowed, remaining, retry_after }. Fails open on DO errors so a
+// transient outage never locks admins out, but logs the failure.
+async function rateCheck(env, kind, identifier, limit, windowSeconds) {
+  try {
+    const id = env.GATEWAY.idFromName("eternal-auth-primary-gateway");
+    const gateway = env.GATEWAY.get(id);
+    const response = await gateway.fetch("https://gateway.internal/rate-check", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, id: identifier, limit, window: windowSeconds }),
+    });
+    if (!response.ok) {
+      console.warn("rateCheck non-ok", kind, response.status);
+      return { allowed: true, remaining: limit, retry_after: 0 };
+    }
+    return await response.json();
+  } catch (error) {
+    console.warn("rateCheck failed", kind, error);
+    return { allowed: true, remaining: limit, retry_after: 0 };
+  }
+}
+
+function clientIp(request) {
+  return (
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown"
+  );
 }
 
 function now() {
@@ -998,7 +1092,7 @@ async function ensureDefaultScript(env, guildId) {
     const loaderId = await deriveScriptLoaderId(env, id);
     await env.DB.prepare(
       `INSERT INTO scripts (id, guild_id, loader_id, name, version, enabled, content, created_at, updated_at)
-       VALUES (?, ?, ?, 'Eternal Auth Script', '1.0.0', 1, '', ?, ?)`
+       VALUES (?, ?, ?, 'Voltra Auth Script', '1.0.0', 1, '', ?, ?)`
     ).bind(id, guildId, loaderId, timestamp, timestamp).run();
     script = await env.DB.prepare("SELECT * FROM scripts WHERE id = ?").bind(id).first();
   }
@@ -1052,17 +1146,17 @@ async function createServerSetupKey(env, { intendedGuildId = null, expiresInHour
 
 async function consumeServerSetupKey(env, rawKey, guildId, discordId) {
   const normalized = String(rawKey || "").trim().toUpperCase();
-  if (!/^EA-SRV-[A-F0-9]{40}$/.test(normalized)) return { ok: false, error: "Invalid Eternal Auth server key." };
+  if (!/^EA-SRV-[A-F0-9]{40}$/.test(normalized)) return { ok: false, error: "Invalid Voltra Auth server key." };
 
   const keyHash = await sha256Hex(normalized);
   const row = await env.DB.prepare(
     `SELECT * FROM server_setup_keys WHERE key_hash = ? LIMIT 1`
   ).bind(keyHash).first();
 
-  if (!row) return { ok: false, error: "Invalid Eternal Auth server key." };
-  if (row.used_at) return { ok: false, error: "That Eternal Auth server key has already been used." };
+  if (!row) return { ok: false, error: "Invalid Voltra Auth server key." };
+  if (row.used_at) return { ok: false, error: "That Voltra Auth server key has already been used." };
   if (Number(row.expires_at) > 0 && Number(row.expires_at) <= now()) {
-    return { ok: false, error: "That Eternal Auth server key has expired." };
+    return { ok: false, error: "That Voltra Auth server key has expired." };
   }
   if (row.intended_guild_id && String(row.intended_guild_id) !== String(guildId)) {
     return { ok: false, error: "That server key was created for a different Discord server." };
@@ -1075,7 +1169,7 @@ async function consumeServerSetupKey(env, rawKey, guildId, discordId) {
      WHERE id = ? AND used_at IS NULL`
   ).bind(usedAt, guildId, discordId, row.id).run();
 
-  if (!result?.meta?.changes) return { ok: false, error: "That Eternal Auth server key has already been used." };
+  if (!result?.meta?.changes) return { ok: false, error: "That Voltra Auth server key has already been used." };
   return { ok: true, row: { ...row, used_at: usedAt, used_by_guild_id: guildId, used_by_discord_id: discordId } };
 }
 
@@ -1302,6 +1396,17 @@ async function handleProtectedLoader(request, env, ctx) {
   if (!key) return deniedSource("Missing key");
   if (!deviceId) return deniedSource("Missing HWID");
 
+  // Loader rate limit per client IP. Blocks automated scraping of the
+  // obfuscated Lua payload; a legitimate executor fetches at most a few
+  // times a minute.
+  const limit = await rateCheck(env, "loader", clientIp(request), 120, 300);
+  if (!limit.allowed) {
+    return new Response("Rate limited.", {
+      status: 429,
+      headers: { "retry-after": String(limit.retry_after || 60) },
+    });
+  }
+
   // Fast path: hash the license key and HWID in parallel, then fetch the
   // license, blacklist state and requested script in one D1 query.
   const [keyHash, deviceHash] = await Promise.all([
@@ -1377,7 +1482,7 @@ async function handleProtectedLoader(request, env, ctx) {
   if (row.status !== "active") {
     const message = row.status === "disabled"
       ? "The script you are trying to access has been disabled by its owner."
-      : `Eternal Auth: License is ${row.status || "disabled"}`;
+      : `Voltra Auth: License is ${row.status || "disabled"}`;
     return deniedSource();
   }
 
@@ -1435,7 +1540,12 @@ async function handleProtectedLoader(request, env, ctx) {
     .run();
   if (ctx?.waitUntil) ctx.waitUntil(executionLog); else await executionLog;
 
-  return new Response(script.content, {
+  // Per-request Lua obfuscation. Each delivered copy has a unique XOR key
+  // and a watermark derived from the license id, so a leaked payload can be
+  // traced back to a specific user. See src/lua-obfuscator.js.
+  const protectedPayload = await obfuscateForLicense(env, script.content, row.id);
+
+  return new Response(protectedPayload, {
     status: 200,
     headers: {
       "content-type": "text/plain; charset=utf-8",
@@ -1445,6 +1555,20 @@ async function handleProtectedLoader(request, env, ctx) {
       "x-eternal-script-id": script.id,
     },
   });
+}
+
+async function obfuscateForLicense(env, source, licenseId) {
+  try {
+    let watermark = "";
+    if (env?.CONFIG_SECRET && licenseId != null) {
+      const bytes = await hmacBytes(env.CONFIG_SECRET, `license-watermark:${licenseId}`);
+      watermark = bytesToHex(bytes.subarray(0, 8));
+    }
+    return obfuscateLua(source, { watermark });
+  } catch (error) {
+    console.warn("Lua obfuscation failed, serving raw", error);
+    return source;
+  }
 }
 
 
@@ -1477,7 +1601,7 @@ function loaderBrowserPage(loaderUrl) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Eternal Auth • Loadstring</title>
+<title>Voltra Auth • Loadstring</title>
 <style>
   :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#181d31;color:#f4f6ff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center}.wrap{width:min(830px,calc(100% - 32px));text-align:center}.title{font-weight:800;font-size:21px;margin:0 0 20px}.card{position:relative;background:#111626;border:1px solid rgba(255,255,255,.035);border-radius:12px;padding:20px 78px 20px 18px;box-shadow:0 16px 40px rgba(0,0,0,.2);text-align:left;overflow:auto}.card pre{margin:0;white-space:pre;min-width:max-content;font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}.copy{position:absolute;right:12px;top:11px;border:1px solid #42507a;background:#27345d;color:#fff;border-radius:9px;padding:8px 14px;font-weight:700;cursor:pointer}.copy:hover{background:#324173}.note{font-size:12px;margin-top:17px;color:#d5d9e6}.brand{color:#8ba6ff}.comment{color:#6fbd73}.kw{color:#8ec5ff}.str{color:#ff8c7a}
 </style>
@@ -1489,7 +1613,7 @@ function loaderBrowserPage(loaderUrl) {
     <button class="copy" id="copyBtn" type="button">Copy</button>
     <pre id="code">${safeSnippet}</pre>
   </section>
-  <div class="note">Contents can not be displayed in browser • <span class="brand">Eternal Auth</span></div>
+  <div class="note">Contents can not be displayed in browser • <span class="brand">Voltra Auth</span></div>
 </main>
 <script>
   document.getElementById('copyBtn').addEventListener('click', async () => {
@@ -1512,7 +1636,7 @@ function loaderBrowserPage(loaderUrl) {
 }
 
 function protectedBrowserPage(origin) {
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Eternal Auth</title><style>:root{color-scheme:dark}body{margin:0;min-height:100vh;background:#181d31;color:#f4f6ff;font-family:Inter,system-ui,sans-serif;display:grid;place-items:center}.box{text-align:center}.box h1{font-size:22px}.box p{color:#b9c0d4}</style></head><body><div class="box"><h1>🔒 Eternal Auth</h1><p>Protected source cannot be displayed in a browser.</p><p>${escapeHtml(origin)}</p></div></body></html>`, {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Voltra Auth</title><style>:root{color-scheme:dark}body{margin:0;min-height:100vh;background:#181d31;color:#f4f6ff;font-family:Inter,system-ui,sans-serif;display:grid;place-items:center}.box{text-align:center}.box h1{font-size:22px}.box p{color:#b9c0d4}</style></head><body><div class="box"><h1>🔒 Voltra Auth</h1><p>Protected source cannot be displayed in a browser.</p><p>${escapeHtml(origin)}</p></div></body></html>`, {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "x-content-type-options": "nosniff" },
   });
@@ -1850,7 +1974,7 @@ end`;
     ? `local headers={["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Stage-Proof"]=__ea_stage_proof,["X-Eternal-Execute"]="1"}`
     : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Stage-Proof"]=__ea_stage_proof,["X-Eternal-Execute"]="1"}`;
 
-  return `-- Eternal Auth protected bootstrap
+  return `-- Voltra Auth protected bootstrap
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
 local lp=P.LocalPlayer
@@ -1884,7 +2008,7 @@ if not d or tostring(d)=="" then d=legacyDevice end
 if not d or tostring(d)=="" then K("Missing HWID") return end
 
 local req=request or http_request or (syn and syn.request) or (http and http.request)
-if type(req)~="function" then K("Eternal Auth requires an HTTP request function.") return end
+if type(req)~="function" then K("Voltra Auth requires an HTTP request function.") return end
 
 local u=${JSON.stringify(apiUrl)}
 local __ea_stage_reverse=${JSON.stringify(reversedStageChallenge)}
@@ -2007,7 +2131,7 @@ for _,env in ipairs(__ea_clipboard_envs) do
 end
 
 local ok,result=pcall(req,{Url=u,Method="POST",Headers=headers})
-if not ok or not result then K("Eternal Auth connection failed.") return end
+if not ok or not result then K("Voltra Auth connection failed.") return end
 
 local status=tonumber(result.StatusCode or result.status_code or result.Status or 0)
 local body=result.Body or result.body or ""
@@ -2017,7 +2141,7 @@ if status~=200 then
     else
         local reason=tostring(body or "")
         if reason=="" then reason="Access denied" end
-        K("Eternal Auth: "..reason)
+        K("Voltra Auth: "..reason)
     end
     return
 end
@@ -2044,7 +2168,7 @@ end)
 body=nil
 
 if type(fn)~="function" then
-    error("Eternal Auth loader compile error: "..tostring(compileErr),0)
+    error("Voltra Auth loader compile error: "..tostring(compileErr),0)
 end
 
 fn()`;
@@ -2054,7 +2178,7 @@ async function tryD1(label, operation) {
   try {
     return await operation();
   } catch (error) {
-    console.error(`Eternal Auth D1 migration warning [${label}]`, error);
+    console.error(`Voltra Auth D1 migration warning [${label}]`, error);
     return null;
   }
 }
@@ -2072,6 +2196,7 @@ async function ensureAdminAuthSchema(env) {
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_sessions (
       id TEXT PRIMARY KEY,
       token_hash TEXT NOT NULL UNIQUE,
+      csrf_token TEXT,
       created_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL,
       last_seen_at INTEGER NOT NULL
@@ -2087,6 +2212,9 @@ async function ensureAdminAuthSchema(env) {
 
   await tryD1("admin_sessions index", () =>
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at)").run()
+  );
+  await tryD1("admin_sessions csrf column", () =>
+    env.DB.prepare("ALTER TABLE admin_sessions ADD COLUMN csrf_token TEXT").run()
   );
 
   await env.DB.prepare(
@@ -2166,7 +2294,7 @@ async function ensureBackendPersistenceSchema(env) {
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
         loader_id TEXT UNIQUE,
-        name TEXT NOT NULL DEFAULT 'Eternal Auth Script',
+        name TEXT NOT NULL DEFAULT 'Voltra Auth Script',
         version TEXT NOT NULL DEFAULT '1.0.0',
         enabled INTEGER NOT NULL DEFAULT 1,
         ffa_enabled INTEGER NOT NULL DEFAULT 0,
@@ -2205,7 +2333,7 @@ async function ensureBackendPersistenceSchema(env) {
       `CREATE TABLE IF NOT EXISTS panels (
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
-        name TEXT NOT NULL DEFAULT 'Eternal Auth Panel',
+        name TEXT NOT NULL DEFAULT 'Voltra Auth Panel',
         channel_id TEXT,
         manager_role_id TEXT,
         buyer_role_id TEXT,
@@ -2299,7 +2427,7 @@ async function ensureBackendPersistenceSchema(env) {
 
     await ensureColumns("scripts", {
       loader_id: "TEXT",
-      name: "TEXT NOT NULL DEFAULT 'Eternal Auth Script'",
+      name: "TEXT NOT NULL DEFAULT 'Voltra Auth Script'",
       version: "TEXT NOT NULL DEFAULT '1.0.0'",
       enabled: "INTEGER NOT NULL DEFAULT 1",
       ffa_enabled: "INTEGER NOT NULL DEFAULT 0",
@@ -2328,7 +2456,7 @@ async function ensureBackendPersistenceSchema(env) {
     });
 
     await ensureColumns("panels", {
-      name: "TEXT NOT NULL DEFAULT 'Eternal Auth Panel'",
+      name: "TEXT NOT NULL DEFAULT 'Voltra Auth Panel'",
       channel_id: "TEXT",
       manager_role_id: "TEXT",
       buyer_role_id: "TEXT",
@@ -2450,23 +2578,34 @@ async function verifyAdminPassword(env, password) {
   return diff === 0;
 }
 
+// Session cookie name uses the __Host- prefix to opt into the browser's
+// strictest first-party rules (requires Secure, Path=/, and no Domain attr).
+// Any older ea_session cookie in the browser is harmless; it never matches
+// the new backend-side token hash column, so it just expires on its own.
+const SESSION_COOKIE_NAME = "__Host-vol_session";
+const SESSION_COOKIE_REGEX = /(?:^|;\s*)__Host-vol_session=([^;]+)/;
+const SESSION_TTL_SECONDS = 12 * 3600;
+const SESSION_IDLE_SECONDS = 2 * 3600;
+const SESSION_COOKIE_FLAGS = "HttpOnly; Secure; SameSite=Strict; Path=/";
+
 function adminSessionCookieToken(request) {
   const cookie = request.headers.get("cookie") || "";
-  const match = cookie.match(/(?:^|;\s*)ea_session=([^;]+)/);
+  const match = cookie.match(SESSION_COOKIE_REGEX);
   return match ? match[1] : null;
 }
 
 async function createAdminSession(env) {
   const rawToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const csrfToken = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await sha256Hex(rawToken);
   const timestamp = now();
-  const expiresAt = timestamp + 12 * 3600;
+  const expiresAt = timestamp + SESSION_TTL_SECONDS;
   await env.DB.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").bind(timestamp).run();
   await env.DB.prepare(
-    `INSERT INTO admin_sessions (id, token_hash, created_at, expires_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).bind(crypto.randomUUID(), tokenHash, timestamp, expiresAt, timestamp).run();
-  return { token: rawToken, expires_at: expiresAt };
+    `INSERT INTO admin_sessions (id, token_hash, csrf_token, created_at, expires_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(crypto.randomUUID(), tokenHash, csrfToken, timestamp, expiresAt, timestamp).run();
+  return { token: rawToken, csrf: csrfToken, expires_at: expiresAt };
 }
 
 async function verifyAdminSession(request, env) {
@@ -2482,7 +2621,14 @@ async function verifyAdminSession(request, env) {
     await env.DB.prepare("DELETE FROM admin_sessions WHERE id = ?").bind(row.id).run();
     return false;
   }
-  if (timestamp - Number(row.last_seen_at || 0) >= 300) {
+  // Idle timeout: if the session has not been touched for SESSION_IDLE_SECONDS,
+  // treat it as expired and revoke it. Hardens against stolen cookies left idle.
+  const lastSeen = Number(row.last_seen_at || 0);
+  if (lastSeen > 0 && timestamp - lastSeen >= SESSION_IDLE_SECONDS) {
+    await env.DB.prepare("DELETE FROM admin_sessions WHERE id = ?").bind(row.id).run();
+    return false;
+  }
+  if (timestamp - lastSeen >= 300) {
     await env.DB.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?")
       .bind(timestamp, row.id)
       .run();
@@ -2497,8 +2643,8 @@ async function handleAdminLogin(request, env) {
     return json({ ok: false, error: "Invalid password" }, 401);
   }
   const session = await createAdminSession(env);
-  return json({ ok: true, backend_persisted: true }, 200, {
-    "set-cookie": `ea_session=${session.token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=43200`,
+  return json({ ok: true, backend_persisted: true, csrf: session.csrf }, 200, {
+    "set-cookie": `${SESSION_COOKIE_NAME}=${session.token}; ${SESSION_COOKIE_FLAGS}; Max-Age=${SESSION_TTL_SECONDS}`,
   });
 }
 
@@ -2509,8 +2655,41 @@ async function handleAdminLogout(request, env) {
     await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
   }
   return json({ ok: true }, 200, {
-    "set-cookie": "ea_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+    "set-cookie": `${SESSION_COOKIE_NAME}=; ${SESSION_COOKIE_FLAGS}; Max-Age=0`,
   });
+}
+
+async function handleAdminCsrf(session) {
+  if (!session?.csrf_token) {
+    return json({ ok: false, error: "No CSRF token on this session" }, 500);
+  }
+  return json({ ok: true, csrf: session.csrf_token });
+}
+
+// Constant-time string compare for CSRF tokens.
+async function csrfTokensMatch(a, b) {
+  if (!a || !b) return false;
+  const enc2 = new TextEncoder();
+  const aHash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc2.encode(String(a))));
+  const bHash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc2.encode(String(b))));
+  if (typeof crypto.subtle.timingSafeEqual === "function") {
+    return crypto.subtle.timingSafeEqual(aHash, bHash);
+  }
+  let diff = 0;
+  for (let i = 0; i < aHash.length; i++) diff |= aHash[i] ^ bHash[i];
+  return diff === 0;
+}
+
+async function requireCsrf(request, session) {
+  if (!session?.csrf_token) {
+    return json({ ok: false, error: "Session is missing CSRF token; sign in again." }, 403);
+  }
+  const header = request.headers.get("x-voltra-csrf") || "";
+  const ok = await csrfTokensMatch(session.csrf_token, header);
+  if (!ok) {
+    return json({ ok: false, error: "CSRF token mismatch" }, 403);
+  }
+  return null;
 }
 
 async function getAdminState(env) {
@@ -2603,7 +2782,7 @@ async function handleAdminApi(request, env, url, ctx) {
     await env.DB.prepare("DELETE FROM admin_sessions").run();
     await audit(env, null, "admin.password_changed", "dashboard", "primary", {});
     return json({ ok: true, reauthenticate: true }, 200, {
-      "set-cookie": "ea_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+      "set-cookie": `${SESSION_COOKIE_NAME}=; ${SESSION_COOKIE_FLAGS}; Max-Age=0`,
     });
   }
 
@@ -3027,7 +3206,7 @@ async function handleAdminApi(request, env, url, ctx) {
     const existing = await env.DB.prepare("SELECT * FROM scripts WHERE id = ? LIMIT 1").bind(scriptId).first();
     if (!existing) return json({ ok: false, error: "Script not found" }, 404);
     const body = await readJson(request);
-    const name = cleanText(body?.name, 100) || existing.name || "Eternal Auth Script";
+    const name = cleanText(body?.name, 100) || existing.name || "Voltra Auth Script";
     const version = cleanText(body?.version, 40) || existing.version || "1.0.0";
     const enabled = body?.enabled == null ? Number(existing.enabled) : (body.enabled === false ? 0 : 1);
     const ffaEnabled = body?.ffa_enabled == null ? Number(existing.ffa_enabled || 0) : (body.ffa_enabled === true ? 1 : 0);
@@ -3236,8 +3415,8 @@ async function updateDeferredDiscordResponse(interaction, response) {
   if (!data) {
     data = {
       content: response?.ok === false
-        ? "Eternal Auth could not complete that command."
-        : "Eternal Auth finished the command.",
+        ? "Voltra Auth could not complete that command."
+        : "Voltra Auth finished the command.",
       allowed_mentions: { parse: [] },
     };
   }
@@ -3334,7 +3513,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       if (action === "redeem") {
         return discordModal(
           `eternal:redeem_modal${panelId ? `:${panelId}` : ""}`,
-          "Redeem Eternal Auth Key",
+          "Redeem Voltra Auth Key",
           "Redeem code",
           "ETERNAL-...",
         );
@@ -3359,7 +3538,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
             const message = String(error?.message || error || "unknown error").slice(0, 180);
             await updateDeferredDiscordResponse(
               interaction,
-              discordMessage(`Eternal Auth action failed: ${message}`),
+              discordMessage(`Voltra Auth action failed: ${message}`),
             );
           }
         })());
@@ -3382,7 +3561,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
           const message = String(error?.message || error || "unknown error").slice(0, 180);
           await updateDeferredDiscordResponse(
             interaction,
-            discordMessage(`Eternal Auth action failed: ${message}`),
+            discordMessage(`Voltra Auth action failed: ${message}`),
           );
         }
       })());
@@ -3399,7 +3578,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
           const message = String(error?.message || error || "unknown error").slice(0, 180);
           await updateDeferredDiscordResponse(
             interaction,
-            discordMessage(`Eternal Auth command failed: ${message}`),
+            discordMessage(`Voltra Auth command failed: ${message}`),
           );
         }
       })());
@@ -3419,7 +3598,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     const choices = (panels.results || [])
       .filter((panel) => !query || String(panel.name || "").toLowerCase().includes(query) || String(panel.id).toLowerCase().includes(query))
       .slice(0, 25)
-      .map((panel) => ({ name: String(panel.name || "Eternal Auth Panel").slice(0, 100), value: String(panel.id) }));
+      .map((panel) => ({ name: String(panel.name || "Voltra Auth Panel").slice(0, 100), value: String(panel.id) }));
     return json({ type: 8, data: { choices } });
   }
 
@@ -3449,7 +3628,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
   const name = interaction.data?.name;
   const guildId = interaction.guild_id;
   const userId = interactionUserId(interaction);
-  if (!guildId || !userId) return discordMessage("Eternal Auth commands must be used in a server.");
+  if (!guildId || !userId) return discordMessage("Voltra Auth commands must be used in a server.");
 
   const opts = optionMap(interaction);
 
@@ -3461,8 +3640,8 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       await ensureGuildBaseUrl(env, existingGuild, new URL(request.url).origin);
       const existingLoaderUrl = loaderUrlForGuild(existingGuild);
       return discordMessage(existingLoaderUrl
-        ? `Eternal Auth is already linked to this server.\n\n**Loader URL:**\n${existingLoaderUrl}`
-        : "Eternal Auth is already linked to this server.");
+        ? `Voltra Auth is already linked to this server.\n\n**Loader URL:**\n${existingLoaderUrl}`
+        : "Voltra Auth is already linked to this server.");
     }
 
     const serverKey = cleanText(opts.key, 512) || "";
@@ -3484,11 +3663,11 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       .run();
 
     await audit(env, guildId, "discord.login", userId, guildId, { server_key_id: consumed.row.id });
-    return discordMessage("✅ Eternal Auth is linked. That server key has been consumed and cannot be reused. Now run `/setpanel` with your loader template, manager role, and optional buyer role.");
+    return discordMessage("✅ Voltra Auth is linked. That server key has been consumed and cannot be reused. Now run `/setpanel` with your loader template, manager role, and optional buyer role.");
   }
 
   const guild = await getGuild(env, guildId);
-  if (!guild) return discordMessage("Eternal Auth is not configured here yet. A server administrator must run `/login`.");
+  if (!guild) return discordMessage("Voltra Auth is not configured here yet. A server administrator must run `/login`.");
   await ensureGuildBaseUrl(env, guild, new URL(request.url).origin);
 
   if (name === "logout") {
@@ -3497,7 +3676,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       .bind(now(), guildId)
       .run();
     await audit(env, guildId, "discord.logout", userId, guildId, {});
-    return discordMessage("✅ Eternal Auth has been logged out from this server.");
+    return discordMessage("✅ Voltra Auth has been logged out from this server.");
   }
 
   if (name === "setlogs") {
@@ -3509,7 +3688,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
         .bind(now(), guildId)
         .run();
       await audit(env, guildId, "discord.setlogs", userId, "disabled", {});
-      return discordMessage("✅ Eternal Auth command logs are disabled.");
+      return discordMessage("✅ Voltra Auth command logs are disabled.");
     }
     if (!/^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(webhook)) {
       return discordMessage("That does not look like a Discord webhook URL.");
@@ -3519,7 +3698,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       .bind(encrypted, now(), guildId)
       .run();
     await audit(env, guildId, "discord.setlogs", userId, "webhook", {});
-    return discordMessage("✅ Eternal Auth logs will be sent through that webhook.");
+    return discordMessage("✅ Voltra Auth logs will be sent through that webhook.");
   }
 
   if (name === "setpanel") {
@@ -3551,7 +3730,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       const attachmentUrl = new URL(attachment.url);
       if (attachmentUrl.protocol !== "https:") throw new Error("Attachment URL must use HTTPS");
       const response = await fetch(attachmentUrl.toString(), {
-        headers: { "user-agent": "EternalAuth/1.8.6" },
+        headers: { "user-agent": "VoltraAuth/1.9.0" },
         cf: { cacheTtl: 30, cacheEverything: true },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -3563,14 +3742,14 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     try {
       [uploadedText, enabledScripts] = await Promise.all([attachmentPromise, scriptsPromise]);
     } catch (error) {
-      console.error("Eternal Auth setpanel preload failed", error);
+      console.error("Voltra Auth setpanel preload failed", error);
       return discordMessage("I could not prepare the uploaded loader script. Please try again.");
     }
 
     if (!uploadedText) return discordMessage("The uploaded loader script file is empty.");
     const uploadedLoaderUrl = extractLoaderUrl(uploadedText);
     if (!uploadedLoaderUrl) {
-      return discordMessage('The loader file only needs a normal Eternal Auth loadstring, for example `loadstring(game:HttpGet("https://.../files/v4/loaders/LOADER_ID.lua"))()` (a bare loader URL also works).');
+      return discordMessage('The loader file only needs a normal Voltra Auth loadstring, for example `loadstring(game:HttpGet("https://.../files/v4/loaders/LOADER_ID.lua"))()` (a bare loader URL also works).');
     }
 
     let parsedLoaderUrl;
@@ -3579,10 +3758,10 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     if (parsedLoaderUrl.protocol !== "https:") return discordMessage("The loader URL must use HTTPS.");
 
     const loaderMatch = parsedLoaderUrl.pathname.match(/^\/files\/v4\/loaders\/([a-f0-9]{32})\.lua$/i);
-    if (!loaderMatch) return discordMessage("The uploaded loadstring must point to an Eternal Auth `/files/v4/loaders/<loader-id>.lua` URL.");
+    if (!loaderMatch) return discordMessage("The uploaded loadstring must point to an Voltra Auth `/files/v4/loaders/<loader-id>.lua` URL.");
 
     enabledScripts = (enabledScripts || []).slice(0, 25);
-    if (!enabledScripts.length) return discordMessage("This Eternal Auth project has no enabled scripts to link a panel to.");
+    if (!enabledScripts.length) return discordMessage("This Voltra Auth project has no enabled scripts to link a panel to.");
 
     const draftId = crypto.randomUUID();
     const ts = now();
@@ -3710,7 +3889,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       .bind(days * 86400, now(), guildId)
       .run();
     await audit(env, guildId, "discord.compensate", userId, guildId, { days });
-    ctx.waitUntil(sendLog(env, guild, `🎁 Added ${days} day(s) to all expiring Eternal Auth licenses.`));
+    ctx.waitUntil(sendLog(env, guild, `🎁 Added ${days} day(s) to all expiring Voltra Auth licenses.`));
     return discordMessage(`✅ Added ${days} day(s) to all non-lifetime licenses.`);
   }
 
@@ -3718,7 +3897,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     if (!memberIsManager(interaction, guild)) return discordMessage("Manager permission required.");
     const target = cleanText(opts.user, 64);
     const license = await findAnyLicenseForDiscord(env, guildId, target);
-    if (!license) return discordMessage("That user has no Eternal Auth license.");
+    if (!license) return discordMessage("That user has no Voltra Auth license.");
     await env.DB.prepare("UPDATE licenses SET hwid_hash = NULL, last_hwid_reset = ?, updated_at = ? WHERE id = ?")
       .bind(now(), now(), license.id)
       .run();
@@ -3779,10 +3958,10 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
       env.DB.prepare("SELECT COUNT(*) AS n FROM blacklists WHERE guild_id = ?").bind(guildId).first(),
       env.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE guild_id = ? AND occurred_at >= ?").bind(guildId, now() - 86400).first(),
     ]);
-    return discordMessage(`📊 **Eternal Auth Stats**\nActive licenses: **${licenses?.n || 0}**\nBlacklisted: **${blacklisted?.n || 0}**\nExecutions (24h): **${execs?.n || 0}**`);
+    return discordMessage(`📊 **Voltra Auth Stats**\nActive licenses: **${licenses?.n || 0}**\nBlacklisted: **${blacklisted?.n || 0}**\nExecutions (24h): **${execs?.n || 0}**`);
   }
 
-  return discordMessage("Unknown Eternal Auth command.");
+  return discordMessage("Unknown Voltra Auth command.");
 }
 
 function panelComponents(panelId = null) {
@@ -3810,7 +3989,7 @@ async function handleDiscordComponent(interaction, env, ctx) {
   const userId = interactionUserId(interaction);
   if (!guildId || !userId) return discordMessage("This panel only works in a server.");
   const guild = await getGuild(env, guildId);
-  if (!guild) return discordMessage("Eternal Auth is not configured in this server.");
+  if (!guild) return discordMessage("Voltra Auth is not configured in this server.");
 
   if (action === "setpanel_project") {
     const draftId = panelId;
@@ -3836,7 +4015,7 @@ async function handleDiscordComponent(interaction, env, ctx) {
     if (!script) return discordMessage("That project is no longer available.");
 
     const loaderUrl = loaderUrlForScript(guild, script);
-    if (!loaderUrl) return discordMessage("Eternal Auth could not build this project's loader URL.");
+    if (!loaderUrl) return discordMessage("Voltra Auth could not build this project's loader URL.");
     const loaderTemplate = `script_key="{{KEY}}";\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
     draft.selected_script_id = script.id;
     draft.loader_template = loaderTemplate;
@@ -3847,8 +4026,8 @@ async function handleDiscordComponent(interaction, env, ctx) {
       "UPDATE panel_drafts SET selected_script_id = ?, loader_template = ? WHERE id = ?"
     ).bind(script.id, loaderTemplate, draftId).run();
 
-    const defaultTitle = `${script.name || "Eternal Auth"} Control Panel`.slice(0, 256);
-    const defaultDescription = `This control panel is for the project: **${script.name || "Eternal Auth"}**\nIf you're a buyer, click on the buttons below to redeem your key, get the script or get your role`.slice(0, 4000);
+    const defaultTitle = `${script.name || "Voltra Auth"} Control Panel`.slice(0, 256);
+    const defaultDescription = `This control panel is for the project: **${script.name || "Voltra Auth"}**\nIf you're a buyer, click on the buttons below to redeem your key, get the script or get your role`.slice(0, 4000);
 
     return json({
       type: 9,
@@ -3865,17 +4044,17 @@ async function handleDiscordComponent(interaction, env, ctx) {
   }
 
   const panel = panelId ? await getPanel(env, guildId, panelId) : null;
-  if (panelId && !panel) return discordMessage("This Eternal Auth panel has been disabled or removed.");
+  if (panelId && !panel) return discordMessage("This Voltra Auth panel has been disabled or removed.");
   const panelGuild = guildForPanel(guild, panel);
 
   if (action === "redeem") {
-    return discordModal(`eternal:redeem_modal${panelId ? `:${panelId}` : ""}`, "Redeem Eternal Auth Key", "Redeem code", "ETERNAL-...");
+    return discordModal(`eternal:redeem_modal${panelId ? `:${panelId}` : ""}`, "Redeem Voltra Auth Key", "Redeem code", "ETERNAL-...");
   }
   if (action === "copy_script" || action === "mobile_copy_script") {
     const selectedScriptId = cleanText(parts[3], 128);
     const copyPanel = panelId && panelId !== "guild" ? await getPanel(env, guildId, panelId) : null;
     if (panelId && panelId !== "guild" && !copyPanel) {
-      return discordMessage("This Eternal Auth panel has been disabled or removed.");
+      return discordMessage("This Voltra Auth panel has been disabled or removed.");
     }
     const copyGuild = guildForPanel(guild, copyPanel);
     return sendOwnScript(
@@ -3909,7 +4088,7 @@ async function handleDiscordComponent(interaction, env, ctx) {
     const execs = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM executions WHERE guild_id = ? AND license_id = ?"
     ).bind(guildId, license.id).first();
-    return discordMessage(`📊 **Your Eternal Auth Stats**\nStatus: **${license.status || "active"}**\nExpires: **${license.auth_expire === -1 ? "Lifetime" : new Date(Number(license.auth_expire) * 1000).toLocaleString()}**\nHWID: **${license.hwid_hash ? "Linked" : "Not linked"}**\nExecutions: **${execs?.n || 0}**`);
+    return discordMessage(`📊 **Your Voltra Auth Stats**\nStatus: **${license.status || "active"}**\nExpires: **${license.auth_expire === -1 ? "Lifetime" : new Date(Number(license.auth_expire) * 1000).toLocaleString()}**\nHWID: **${license.hwid_hash ? "Linked" : "Not linked"}**\nExecutions: **${execs?.n || 0}**`);
   }
   return discordMessage("Unknown panel action.");
 }
@@ -3919,7 +4098,7 @@ async function handleDiscordModalSubmit(interaction, env, ctx) {
   const userId = interactionUserId(interaction);
   if (!guildId || !userId) return discordMessage("This action only works in a server.");
   const guild = await getGuild(env, guildId);
-  if (!guild) return discordMessage("Eternal Auth is not configured here.");
+  if (!guild) return discordMessage("Voltra Auth is not configured here.");
 
   const customId = interaction.data?.custom_id || "";
   const parts = customId.split(":");
@@ -3987,7 +4166,7 @@ async function handleDiscordModalSubmit(interaction, env, ctx) {
           (id, guild_id, name, channel_id, manager_role_id, buyer_role_id, loader_template, active, created_by, created_at, updated_at, embed_title, embed_description, embed_color, script_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
-        panelIdFinal, guildId, script.name || "Eternal Auth",
+        panelIdFinal, guildId, script.name || "Voltra Auth",
         draft.channel_id || interaction.channel_id || null, draft.manager_role_id,
         draft.buyer_role_id, draft.loader_template, userId, timestamp, timestamp,
         embedTitle, embedDescription, embedColor, script.id,
@@ -4001,7 +4180,7 @@ async function handleDiscordModalSubmit(interaction, env, ctx) {
       ).bind(guildId, "discord.setpanel", userId, panelIdFinal, auditDetails, timestamp),
     ]);
     cachePut(panelHotCache, `${guildId}:${panelIdFinal}`, {
-      id: panelIdFinal, guild_id: guildId, name: script.name || "Eternal Auth",
+      id: panelIdFinal, guild_id: guildId, name: script.name || "Voltra Auth",
       channel_id: draft.channel_id || interaction.channel_id || null,
       manager_role_id: draft.manager_role_id, buyer_role_id: draft.buyer_role_id,
       loader_template: draft.loader_template, active: 1, created_by: userId,
@@ -4050,7 +4229,7 @@ async function handleDiscordModalSubmit(interaction, env, ctx) {
   }
 
   const panel = panelId ? await getPanel(env, guildId, panelId) : null;
-  if (panelId && !panel) return discordMessage("This Eternal Auth panel has been disabled or removed.");
+  if (panelId && !panel) return discordMessage("This Voltra Auth panel has been disabled or removed.");
   const panelGuild = guildForPanel(guild, panel);
 
   if (action === "redeem_modal") {
@@ -4061,8 +4240,8 @@ async function handleDiscordModalSubmit(interaction, env, ctx) {
 }
 
 async function redeemForDiscord(env, guild, userId, rawCode, ctx) {
-  if (!rawCode) return discordMessage("Enter an Eternal Auth key.");
-  if (await isBlacklisted(env, guild.guild_id, userId)) return discordMessage("You are blacklisted from this Eternal Auth project.");
+  if (!rawCode) return discordMessage("Enter an Voltra Auth key.");
+  if (await isBlacklisted(env, guild.guild_id, userId)) return discordMessage("You are blacklisted from this Voltra Auth project.");
   if (await findLicenseForDiscord(env, guild.guild_id, userId)) return discordMessage("You already have an active license.");
 
   // Luarmor-style redeem: an unclaimed stock key becomes linked to the Discord user.
@@ -4078,7 +4257,7 @@ async function redeemForDiscord(env, guild, userId, rawCode, ctx) {
       .run();
     ctx.waitUntil(addBuyerRole(env, guild, userId));
     await audit(env, guild.guild_id, "discord.redeem_stock_key", userId, stockLicense.id, {});
-    ctx.waitUntil(sendLog(env, guild, `🔑 <@${userId}> redeemed an Eternal Auth stock key.`));
+    ctx.waitUntil(sendLog(env, guild, `🔑 <@${userId}> redeemed an Voltra Auth stock key.`));
     return discordMessage(`✅ Key linked successfully. Use **Get Script** or \`/script\` to receive your loader.`);
   }
 
@@ -4088,7 +4267,7 @@ async function redeemForDiscord(env, guild, userId, rawCode, ctx) {
     .bind(guild.guild_id, codeHash)
     .first();
   if (!code || code.uses_left <= 0 || (code.expires_at !== -1 && code.expires_at <= now())) {
-    return discordMessage("That Eternal Auth key is invalid or expired.");
+    return discordMessage("That Voltra Auth key is invalid or expired.");
   }
 
   const license = await createLicense(env, {
@@ -4106,7 +4285,7 @@ async function redeemForDiscord(env, guild, userId, rawCode, ctx) {
 
   ctx.waitUntil(addBuyerRole(env, guild, userId));
   await audit(env, guild.guild_id, "discord.redeem_code", userId, code.id, { days: code.days });
-  ctx.waitUntil(sendLog(env, guild, `🔑 <@${userId}> redeemed an Eternal Auth code.`));
+  ctx.waitUntil(sendLog(env, guild, `🔑 <@${userId}> redeemed an Voltra Auth code.`));
   return discordMessage(`✅ Redeemed successfully. Your key is \`${license.key}\`. Use **Get Script** or \`/script\` for your loader.`);
 }
 
@@ -4127,13 +4306,13 @@ async function resetOwnHwid(env, guild, userId, ctx) {
     .bind(resetAt, resetAt, license.id, resetAt - cooldown).run();
   if (!reset.meta?.changes) return discordMessage("HWID reset unavailable. Check your license or wait for the five-minute cooldown.");
   await audit(env, guild.guild_id, "discord.resethwid", userId, userId, {});
-  ctx.waitUntil(sendLog(env, guild, `🔄 <@${userId}> reset their Eternal Auth HWID.`));
+  ctx.waitUntil(sendLog(env, guild, `🔄 <@${userId}> reset their Voltra Auth HWID.`));
   return discordMessage("✅ HWID reset. Your next successful authentication will link the new device.");
 }
 
 function extractLoaderUrl(value) {
   const text = String(value || "").trim();
-  // Prefer the URL inside HttpGet(...), but accept a bare Eternal Auth loader URL too.
+  // Prefer the URL inside HttpGet(...), but accept a bare Voltra Auth loader URL too.
   const httpGet = text.match(/HttpGet\s*\(\s*["'](https:\/\/[^"']+)["']\s*\)/i);
   if (httpGet?.[1]) return httpGet[1];
   const direct = text.match(/https:\/\/[^"')\s]+\/files\/v4\/loaders\/[a-f0-9]{32}\.lua(?:[?#][^"')\s]*)?/i);
@@ -4166,9 +4345,9 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
 
   let scripts = await getScriptsForGuild(env, guild.guild_id, true);
   if (license.panel_id) scripts = scripts.filter((script) => script.id === selectedScriptId);
-  if (!scripts.length) return discordMessage("There are no enabled Eternal Auth scripts in this project.");
+  if (!scripts.length) return discordMessage("There are no enabled Voltra Auth scripts in this project.");
 
-  // A /setpanel loader pins that panel to one specific Eternal Auth script.
+  // A /setpanel loader pins that panel to one specific Voltra Auth script.
   // The guild-level template is the latest panel default, so /script also uses
   // that pinned loader instead of opening a selector when one is available.
   if (!selectedScriptId) {
@@ -4181,7 +4360,7 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
 
   if (!selectedScriptId && scripts.length > 1) {
     const options = scripts.slice(0, 25).map((script) => ({
-      label: String(script.name || "Eternal Auth Script").slice(0, 100),
+      label: String(script.name || "Voltra Auth Script").slice(0, 100),
       value: script.id,
       description: `Version ${String(script.version || "1.0.0").slice(0, 80)}`,
     }));
@@ -4201,11 +4380,11 @@ async function sendOwnScript(env, guild, userId, interaction, selectedScriptId =
   const script = selectedScriptId
     ? scripts.find((row) => row.id === selectedScriptId)
     : scripts[0];
-  if (!script) return discordMessage("That Eternal Auth script is unavailable or disabled.");
+  if (!script) return discordMessage("That Voltra Auth script is unavailable or disabled.");
 
   const key = await deriveLicenseKey(env, license.id);
   const loaderUrl = loaderUrlForScript(guild, script);
-  if (!loaderUrl) return discordMessage("Eternal Auth could not build this script's loader URL yet.");
+  if (!loaderUrl) return discordMessage("Voltra Auth could not build this script's loader URL yet.");
 
   const cleanLoader = `script_key=${JSON.stringify(key)}\nloadstring(game:HttpGet(${JSON.stringify(loaderUrl)}))()`;
   const components = includeCopyButton ? [{
@@ -4253,7 +4432,7 @@ async function sendFfaScript(env, guild, requestedName = null) {
   }
 
   const loaderUrl = ffaLoaderUrlForScript(guild, script);
-  if (!loaderUrl) return discordMessage("Eternal Auth could not build this FFA loader URL yet.");
+  if (!loaderUrl) return discordMessage("Voltra Auth could not build this FFA loader URL yet.");
   return discordMessage(`**${script.name}** • v${script.version} • FFA
 
 No key is required:
@@ -4274,7 +4453,7 @@ function buildLoader(template, key, guild, script = null) {
   // Keep the user-facing result short. The public loader URL returns the
   // credential-handshake wrapper, so protected headers and HWID checks remain
   // server-enforced without displaying that wrapper in Discord.
-  return `script_key=${JSON.stringify(key)}\nlocal __ea_src=game:HttpGet(${JSON.stringify(loaderUrl)}); if type(loadstring)~="function" then error("Eternal Auth: loadstring unavailable",0) end; local __ea_fn,__ea_err=loadstring(__ea_src); if type(__ea_fn)~="function" then error("Eternal Auth loader compile error: "..tostring(__ea_err),0) end; __ea_fn()`;
+  return `script_key=${JSON.stringify(key)}\nlocal __ea_src=game:HttpGet(${JSON.stringify(loaderUrl)}); if type(loadstring)~="function" then error("Voltra Auth: loadstring unavailable",0) end; local __ea_fn,__ea_err=loadstring(__ea_src); if type(__ea_fn)~="function" then error("Voltra Auth loader compile error: "..tostring(__ea_err),0) end; __ea_fn()`;
 }
 
 async function discordApi(env, path, options = {}) {
@@ -4314,16 +4493,16 @@ async function dmLoader(env, guild, userId, key, origin, panel = null) {
   if (scripts.length === 1) {
     const loader = buildLoader(guild.loader_template || defaultLoaderTemplate(), key, guild, scripts[0]);
     content = loader.length <= 1800
-      ? `You were whitelisted for **Eternal Auth**.
+      ? `You were whitelisted for **Voltra Auth**.
 
 **${scripts[0].name}**
 
 \`\`\`lua
 ${loader}
 \`\`\``
-      : `You were whitelisted for **Eternal Auth**. Your key is \`${key}\`. Use \`/script\` in the server to retrieve your loader.`;
+      : `You were whitelisted for **Voltra Auth**. Your key is \`${key}\`. Use \`/script\` in the server to retrieve your loader.`;
   } else {
-    content = `You were whitelisted for **Eternal Auth**. Your key is \`${key}\`. This project has **${scripts.length}** scripts. Use \`/script\` or **Get Script** to choose one.`;
+    content = `You were whitelisted for **Voltra Auth**. Your key is \`${key}\`. This project has **${scripts.length}** scripts. Use \`/script\` or **Get Script** to choose one.`;
   }
 
   return !!(await discordApi(env, `/channels/${dm.id}/messages`, {
@@ -4340,14 +4519,14 @@ async function sendLog(env, guild, message) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        username: "Eternal Auth",
+        username: "Voltra Auth",
         content: message,
         allowed_mentions: { parse: [] },
       }),
     });
     return response.ok;
   } catch (error) {
-    console.error("Eternal Auth log webhook error", error);
+    console.error("Voltra Auth log webhook error", error);
     return false;
   }
 }

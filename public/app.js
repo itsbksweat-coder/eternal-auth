@@ -8,12 +8,17 @@ let serverKeyCache = [];
 let scriptCache = [];
 let panelCache = [];
 let selectedScriptId = null;
+// CSRF token for state-changing admin calls. The server returns it on login;
+// state-change methods (POST/PUT/DELETE/PATCH) must echo it as X-Voltra-CSRF.
+let csrfToken = "";
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
-  });
+  const method = (options.method || "GET").toUpperCase();
+  const extraHeaders = { "content-type": "application/json", ...(options.headers || {}) };
+  if (csrfToken && method !== "GET" && method !== "HEAD") {
+    extraHeaders["x-voltra-csrf"] = csrfToken;
+  }
+  const res = await fetch(path, { ...options, headers: extraHeaders });
   let data;
   try { data = await res.json(); } catch { data = { ok: false, error: `HTTP ${res.status}` }; }
   if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
@@ -99,7 +104,7 @@ async function loadBackendStatus(showMessage = false) {
 async function loadProject() {
   try {
     const gid = guildQuery();
-    msg("Loading Eternal Auth project…");
+    msg("Loading Voltra Auth project…");
     const [stats, licenses, stock, blacklists, hwidBlacklists, config, scripts, panels, logs] = await Promise.all([
       api(`/api/admin/stats?guild_id=${gid}`),
       api(`/api/admin/licenses?guild_id=${gid}`),
@@ -139,7 +144,7 @@ async function loadGatewayStatus(showMessage = false) {
     if (showMessage) msg("Checking Discord Gateway…");
     const data = await api("/api/admin/gateway/status");
     renderGateway(data.gateway || {});
-    if (showMessage) msg(data.gateway?.gateway_ready ? "Eternal Auth is Online." : "Gateway is starting…", data.gateway?.gateway_ready ? "success" : "");
+    if (showMessage) msg(data.gateway?.gateway_ready ? "Voltra Auth is Online." : "Gateway is starting…", data.gateway?.gateway_ready ? "success" : "");
   } catch (e) {
     renderGateway({ gateway_ready: false, last_error: e.message });
     if (showMessage) msg(e.message, "error");
@@ -282,8 +287,8 @@ function selectScript(id) {
 
   selectedScriptId = script.id;
   $("#scriptId").value = script.id;
-  $("#scriptEditorTitle").textContent = script.name || "Eternal Auth Script";
-  $("#scriptName").value = script.name || "Eternal Auth Script";
+  $("#scriptEditorTitle").textContent = script.name || "Voltra Auth Script";
+  $("#scriptName").value = script.name || "Voltra Auth Script";
   $("#scriptVersion").value = script.version || "1.0.0";
   $("#scriptEnabled").checked = !!script.enabled;
   $("#scriptFfaEnabled").checked = !!script.ffa_enabled;
@@ -305,7 +310,7 @@ function renderScripts(rows = [], choose = true) {
     <article class="script-item ${script.id === selectedScriptId ? "selected" : ""}" data-script-card="${esc(script.id)}">
       <div class="script-file-icon">LUA</div>
       <div class="script-meta">
-        <h4>${esc(script.name || "Eternal Auth Script")}</h4>
+        <h4>${esc(script.name || "Voltra Auth Script")}</h4>
         <p>${esc(script.id)} • v${esc(script.version || "1.0.0")}</p>
       </div>
       <div class="script-actions">
@@ -358,14 +363,14 @@ function renderPanels(rows = []) {
   if (picker) {
     const current = picker.value;
     const active = rows.filter((row) => row.active && row.script_id);
-    picker.innerHTML = `<option value="">Select panel</option>` + active.map((row) => `<option value="${esc(row.id)}">${esc(row.name || "Eternal Auth Panel")}</option>`).join("");
+    picker.innerHTML = `<option value="">Select panel</option>` + active.map((row) => `<option value="${esc(row.id)}">${esc(row.name || "Voltra Auth Panel")}</option>`).join("");
     if (active.some((row) => row.id === current)) picker.value = current;
   }
   const body = $("#panelRows");
   if (!body) return;
   body.innerHTML = rows.length ? rows.map((r) => `
     <tr>
-      <td>${esc(r.name || "Eternal Auth Panel")}</td>
+      <td>${esc(r.name || "Voltra Auth Panel")}</td>
       <td>${esc(r.channel_id || "—")}</td>
       <td>${esc(r.manager_role_id || "—")}</td>
       <td>${esc(r.buyer_role_id || "—")}</td>
@@ -394,7 +399,8 @@ $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const out = $("#loginMsg");
   try {
-    await api("/api/admin/login", { method: "POST", body: JSON.stringify({ password: $("#password").value }) });
+    const data = await api("/api/admin/login", { method: "POST", body: JSON.stringify({ password: $("#password").value }) });
+    csrfToken = String(data?.csrf || "");
     $("#loginView").classList.add("hidden"); $("#appView").classList.remove("hidden"); $("#logoutBtn").classList.remove("hidden");
     out.textContent = "";
     await loadBackendState();
@@ -405,10 +411,10 @@ $("#loginForm").addEventListener("submit", async (e) => {
 
 $("#wakeGatewayBtn").onclick = async () => {
   try {
-    msg("Waking Eternal Auth Free Gateway…");
+    msg("Waking Voltra Auth Free Gateway…");
     const data = await api("/api/admin/gateway/wake", { method: "POST", body: "{}" });
     renderGateway(data.gateway || {});
-    msg(data.gateway?.gateway_ready ? "Eternal Auth is Online." : "Gateway started and is connecting to Discord…", data.gateway?.gateway_ready ? "success" : "");
+    msg(data.gateway?.gateway_ready ? "Voltra Auth is Online." : "Gateway started and is connecting to Discord…", data.gateway?.gateway_ready ? "success" : "");
     setTimeout(() => loadGatewayStatus(false), 3000);
   } catch (err) { msg(err.message, "error"); }
 };
@@ -684,6 +690,7 @@ function setActiveTab(btn, persist = true) {
 }
 
 $$('[data-tab]').forEach(btn => btn.onclick = () => setActiveTab(btn, true));
+$$('[data-nav]').forEach(btn => btn.onclick = () => { location.href = btn.dataset.nav; });
 
 (async () => {
   // No project/admin state is stored in localStorage. Backend state is restored after login.

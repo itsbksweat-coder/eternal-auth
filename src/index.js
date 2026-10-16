@@ -3361,15 +3361,28 @@ async function verifyDiscordRequest(request, env) {
   }
 }
 
+// Discord interaction responses must NOT go through withSecurityHeaders.
+// Discord's receiver is picky about the response envelope and the browser-level
+// CSP/HSTS/COOP headers are meaningless to it. Use a plain Response.
+function discordJsonResponse(payload) {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function discordMessage(content, ephemeral = true, components = undefined) {
   const data = { content, allowed_mentions: { parse: [] } };
   if (ephemeral) data.flags = EPHEMERAL;
   if (components) data.components = components;
-  return json({ type: 4, data });
+  return discordJsonResponse({ type: 4, data });
 }
 
 function discordModal(customId, title, label, placeholder = "") {
-  return json({
+  return discordJsonResponse({
     type: 9,
     data: {
       custom_id: customId,
@@ -3442,7 +3455,7 @@ async function updateDeferredDiscordResponse(interaction, response) {
 }
 
 function deferredDiscordMessage() {
-  return json({
+  return discordJsonResponse({
     type: 5,
     data: { flags: EPHEMERAL },
   });
@@ -3500,7 +3513,7 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
   // Ping and autocomplete stay synchronous; normal commands are acknowledged
   // immediately and completed through the interaction webhook in waitUntil().
   if (!background) {
-    if (interaction.type === 1) return json({ type: 1 });
+    if (interaction.type === 1) return discordJsonResponse({ type: 1 });
 
     if (interaction.type === 3) {
       const customId = String(interaction.data?.custom_id || "");
@@ -3586,20 +3599,20 @@ async function handleDiscordInteraction(request, env, ctx, verifiedInteraction =
     }
   }
 
-  if (interaction.type === 1) return json({ type: 1 });
+  if (interaction.type === 1) return discordJsonResponse({ type: 1 });
 
   if (interaction.type === 4) {
     const guildId = interaction.guild_id;
     const command = interaction.data?.name;
     const focused = (interaction.data?.options || []).find((option) => option.focused);
-    if (command !== "whitelist" || focused?.name !== "panel" || !guildId) return json({ type: 8, data: { choices: [] } });
+    if (command !== "whitelist" || focused?.name !== "panel" || !guildId) return discordJsonResponse({ type: 8, data: { choices: [] } });
     const query = String(focused.value || "").toLowerCase();
     const panels = await env.DB.prepare("SELECT id, name FROM panels WHERE guild_id = ? AND active = 1 AND script_id IS NOT NULL ORDER BY created_at DESC LIMIT 25").bind(guildId).all();
     const choices = (panels.results || [])
       .filter((panel) => !query || String(panel.name || "").toLowerCase().includes(query) || String(panel.id).toLowerCase().includes(query))
       .slice(0, 25)
       .map((panel) => ({ name: String(panel.name || "Voltra Auth Panel").slice(0, 100), value: String(panel.id) }));
-    return json({ type: 8, data: { choices } });
+    return discordJsonResponse({ type: 8, data: { choices } });
   }
 
   const fastModalAction = interaction.type === 3

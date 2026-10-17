@@ -8,9 +8,25 @@ let serverKeyCache = [];
 let scriptCache = [];
 let panelCache = [];
 let selectedScriptId = null;
-// CSRF token for state-changing admin calls. The server returns it on login;
-// state-change methods (POST/PUT/DELETE/PATCH) must echo it as X-Voltra-CSRF.
+// CSRF token for state-changing admin calls. The server returns it on login
+// or /api/admin/csrf; state-change methods must echo it as X-Voltra-CSRF.
 let csrfToken = "";
+
+// Session persistence model (Discord-style): the real admin session token
+// lives in localStorage, not just the cookie. If the user clears cookies the
+// token survives, the dashboard JS re-presents it as Authorization: Bearer,
+// and the server re-stamps a fresh cookie on the next /api/admin/csrf hit.
+// Only clearing localStorage (or signing out) actually logs the user out.
+const SESSION_STORAGE_KEY = "_vq";
+function storedToken() {
+  try { return localStorage.getItem(SESSION_STORAGE_KEY) || ""; } catch { return ""; }
+}
+function saveToken(token) {
+  try { localStorage.setItem(SESSION_STORAGE_KEY, token || ""); } catch {}
+}
+function clearToken() {
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch {}
+}
 
 async function api(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
@@ -18,9 +34,17 @@ async function api(path, options = {}) {
   if (csrfToken && method !== "GET" && method !== "HEAD") {
     extraHeaders["x-voltra-csrf"] = csrfToken;
   }
+  const token = storedToken();
+  if (token && !extraHeaders.authorization) {
+    extraHeaders.authorization = `Bearer ${token}`;
+  }
   const res = await fetch(path, { ...options, headers: extraHeaders });
   let data;
   try { data = await res.json(); } catch { data = { ok: false, error: `HTTP ${res.status}` }; }
+  if (res.status === 401) {
+    clearToken();
+    location.replace("/login");
+  }
   if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -395,19 +419,23 @@ function renderLogs(rows = []) {
   $("#logRows").innerHTML = rows.length ? rows.map(r => `<tr><td>${esc(fmtTime(r.created_at))}</td><td>${esc(r.action)}</td><td>${esc(r.actor_id || "—")}</td><td>${esc(r.target || "—")}</td><td><code>${esc(r.details || "{}")}</code></td></tr>`).join("") : `<tr><td colspan="5" class="empty">No audit logs yet.</td></tr>`;
 }
 
-// Session bootstrap: if a valid __Host-vol_session cookie is already set we
-// pick up the CSRF token and reveal the dashboard. If not, bounce the user
-// to the standalone /login page so they never see an in-page login form.
+// Session bootstrap: validate via Authorization header (localStorage token)
+// first, fall back to the cookie. Either path works; a stale/missing session
+// bounces to /login.
 async function bootstrapSession() {
+  const token = storedToken();
+  const headers = token ? { authorization: `Bearer ${token}` } : {};
   try {
-    const res = await fetch("/api/admin/csrf", { method: "GET" });
+    const res = await fetch("/api/admin/csrf", { method: "GET", headers });
     if (res.status === 401) {
+      clearToken();
       location.replace("/login");
       return false;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (!data?.ok || !data.csrf) {
+      clearToken();
       location.replace("/login");
       return false;
     }
@@ -431,7 +459,7 @@ $("#wakeGatewayBtn").onclick = async () => {
   } catch (err) { msg(err.message, "error"); }
 };
 
-$("#logoutBtn").onclick = async () => { try { await api("/api/admin/logout", { method: "POST", body: "{}" }); } catch {} location.reload(); };
+$("#logoutBtn").onclick = async () => { try { await api("/api/admin/logout", { method: "POST", body: "{}" }); } catch {} clearToken(); location.replace("/login"); };
 $("#loadBtn").onclick = loadProject;
 $("#refreshBtn").onclick = loadProject;
 $("#licenseSearch").addEventListener("input", () => renderLicenses(window.__licenseRows || []));

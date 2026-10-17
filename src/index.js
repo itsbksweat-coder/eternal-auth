@@ -659,7 +659,7 @@ export default {
           // Dedicated endpoint for the dashboard JS to pick up its CSRF token
           // after a page reload (the token lives only in memory client-side).
           if (url.pathname === "/api/admin/csrf" && request.method === "GET") {
-            return handleAdminCsrf(session);
+            return handleAdminCsrf(request, session);
           }
 
           // Any state-changing admin call must carry a matching CSRF header.
@@ -2666,7 +2666,13 @@ const SESSION_TTL_SECONDS = 12 * 3600;
 const SESSION_IDLE_SECONDS = 2 * 3600;
 const SESSION_COOKIE_FLAGS = "HttpOnly; Secure; SameSite=Strict; Path=/";
 
+// Pull the admin session token from either the Authorization: Bearer header
+// (sent by the dashboard JS from localStorage) or the obfuscated cookie
+// (useful for the first-navigation server-side gate). Either works.
 function adminSessionCookieToken(request) {
+  const auth = request.headers.get("authorization") || "";
+  const bearer = auth.match(/^\s*Bearer\s+([A-Za-z0-9._\-]+)\s*$/i);
+  if (bearer) return bearer[1];
   const cookie = request.headers.get("cookie") || "";
   const match = cookie.match(SESSION_COOKIE_REGEX);
   return match ? match[1] : null;
@@ -2735,7 +2741,13 @@ async function handleAdminLogin(request, env) {
     return json({ ok: false, error: "Invalid password" }, 401);
   }
   const session = await createAdminSession(env);
-  return jsonWithCookies({ ok: true, backend_persisted: true, csrf: session.csrf }, 200, sessionCookieHeaders(session.token));
+  // token is returned in the body so the browser stashes it in localStorage;
+  // the cookie cluster is a convenience for the server-side navigation gate.
+  return jsonWithCookies(
+    { ok: true, backend_persisted: true, csrf: session.csrf, token: session.token, expires_at: session.expires_at },
+    200,
+    sessionCookieHeaders(session.token),
+  );
 }
 
 async function handleAdminLogout(request, env) {
@@ -2756,9 +2768,17 @@ function jsonWithCookies(body, status, cookieHeaders) {
   return withSecurityHeaders(new Response(JSON.stringify(body), { status, headers }));
 }
 
-async function handleAdminCsrf(session) {
+async function handleAdminCsrf(request, session) {
   if (!session?.csrf_token) {
     return json({ ok: false, error: "No CSRF token on this session" }, 500);
+  }
+  // Re-establish the cookie cluster on every csrf fetch. If the client just
+  // authenticated via Authorization: Bearer (e.g. because cookies were
+  // cleared), this re-stamps the cookies so the next page navigation hits
+  // the server-side gate correctly. Also acts as a sliding renewal.
+  const token = adminSessionCookieToken(request);
+  if (token) {
+    return jsonWithCookies({ ok: true, csrf: session.csrf_token }, 200, sessionCookieHeaders(token));
   }
   return json({ ok: true, csrf: session.csrf_token });
 }

@@ -1,4 +1,4 @@
-# Eternal Auth v1.8.9 — panel-scoped licenses
+# Voltra Auth v1.8.9 — panel-scoped licenses
 
 This full project is based on your latest recovered v1.8.6 package. It has not been deployed or tested against your live Cloudflare account or Roblox executor.
 

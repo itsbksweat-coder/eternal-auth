@@ -17,12 +17,12 @@ const ATTACHMENT = 11;
 const commands = [
   {
     name: "login",
-    description: "Link Eternal Auth to this Discord server",
+    description: "Link Voltra Auth to this Discord server",
     options: [
-      { name: "key", description: "One-time Eternal Auth server key created by the owner", type: STRING, required: true },
+      { name: "key", description: "One-time Voltra Auth server key created by the owner", type: STRING, required: true },
     ],
   },
-  { name: "logout", description: "Log Eternal Auth out of this server" },
+  { name: "logout", description: "Log Voltra Auth out of this server" },
   {
     name: "setpanel",
     description: "Sends the control panel message in this channel",
@@ -34,7 +34,7 @@ const commands = [
   },
   {
     name: "setlogs",
-    description: "Set the Discord webhook used for Eternal Auth logs",
+    description: "Set the Discord webhook used for Voltra Auth logs",
     options: [
       { name: "webhook", description: "Discord webhook URL, or 'off' to disable logs", type: STRING, required: true },
     ],
@@ -50,9 +50,10 @@ const commands = [
   },
   {
     name: "unwhitelist",
-    description: "Remove a Discord user's Eternal Auth access",
+    description: "Remove a Discord user's Voltra Auth access from a specific panel",
     options: [
       { name: "user", description: "User to unwhitelist", type: USER, required: true },
+      { name: "panel", description: "Panel to remove them from", type: STRING, required: true, autocomplete: true },
     ],
   },
   {
@@ -95,23 +96,23 @@ const commands = [
   },
   {
     name: "redeem",
-    description: "Redeem an unclaimed Eternal Auth key",
+    description: "Redeem an unclaimed Voltra Auth key",
     options: [
-      { name: "key", description: "Eternal Auth key", type: STRING, required: true },
+      { name: "key", description: "Voltra Auth key", type: STRING, required: true },
     ],
   },
-  { name: "resethwid", description: "Reset the HWID linked to your Eternal Auth key" },
-  { name: "script", description: "Get your personal Eternal Auth loader" },
+  { name: "resethwid", description: "Reset the HWID linked to your Voltra Auth key" },
+  { name: "script", description: "Get your personal Voltra Auth loader" },
   {
     name: "ffa",
     description: "Get a keyless FFA loader when enabled",
     options: [{ name: "script", description: "Script name; omit when only one FFA script is enabled", type: STRING, required: false }],
   },
   { name: "getrole", description: "Restore your configured buyer role" },
-  { name: "stats", description: "Show Eternal Auth project statistics" },
+  { name: "stats", description: "Show Voltra Auth project statistics" },
   {
     name: "unblacklist",
-    description: "Remove a user's Eternal Auth blacklist",
+    description: "Remove a user's Voltra Auth blacklist",
     options: [
       { name: "user", description: "User to unblacklist", type: USER, required: true },
     ],
@@ -137,4 +138,4 @@ if (!response.ok) {
   process.exit(1);
 }
 
-console.log(`Registered ${commands.length} Eternal Auth commands ${GUILD_ID ? `in guild ${GUILD_ID}` : "globally"}.`);
+console.log(`Registered ${commands.length} Voltra Auth commands ${GUILD_ID ? `in guild ${GUILD_ID}` : "globally"}.`);

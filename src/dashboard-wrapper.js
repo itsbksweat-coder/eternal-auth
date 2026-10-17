@@ -66,7 +66,7 @@ async function dashboardAdminAuthorized(request, env, ctx) {
 function discordHeaders(env) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-Dashboard/2.1",
+    "user-agent": "VoltraAuth-Dashboard/2.1",
   };
 }
 
@@ -172,7 +172,7 @@ async function listBotGuilds(env) {
     };
   }
 
-  // Always include the two known Eternal Auth servers as a fallback. Discord
+  // Always include the two known Voltra Auth servers as a fallback. Discord
   // REST is still queried for each ID so names, counts and permissions stay live.
   const allIds = [...new Set([
     ...discovered.ids.map(String),
@@ -219,7 +219,7 @@ export default {
       } catch (error) {
         return json({
           ok: false,
-          error: `Could not read Eternal Auth's Discord servers: ${String(error?.message || error)}`,
+          error: `Could not read Voltra Auth's Discord servers: ${String(error?.message || error)}`,
         }, 502);
       }
     }

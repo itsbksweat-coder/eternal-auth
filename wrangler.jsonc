@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "eternal-auth",
+  "name": "voltra-auth",
   "main": "./src/dm-prefix-wrapper.js",
   "compatibility_date": "2026-08-20",
   "compatibility_flags": [

@@ -368,7 +368,7 @@ local ok,r=pcall(req,{
         ["X-Eternal-Execute"]="1"
     }
 })
-if not ok or not r then stop("Eternal Auth connection failed") return end
+if not ok or not r then stop("Voltra Auth connection failed") return end
 local code=tonumber(r.StatusCode or r.status_code or 0)
 local body=r.Body or r.body or ""
 if code~=200 then
@@ -377,7 +377,7 @@ if code~=200 then
     else
         local reason=tostring(body or "")
         if reason=="" then reason="HTTP "..tostring(code) end
-        stop("Eternal Auth: "..reason)
+        stop("Voltra Auth: "..reason)
     end
     return
 end
@@ -395,12 +395,23 @@ if type(loadstring)~="function" then stop("loadstring unavailable") return end
 local fn,err=loadstring(body)
 pcall(function() r.Body="" r.body="" end)
 body=nil
-if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
+if type(fn)~="function" then error("Voltra Auth loader compile error: "..tostring(err),0) end
 fn()`;
 }
 
+// ffaLauncher is what end users copy and paste into their executor.
+// Deliberately a one-liner: the server endpoint it points to serves the full
+// HWID-collection bootstrap below.
 export function ffaLauncher(url) {
-  return `-- Eternal Auth FFA loader (no key required)
+  return `loadstring(game:HttpGet(${JSON.stringify(url)}))()`;
+}
+
+// ffaBootstrapLua is what the server returns from /files/v4/ffa/{id}.lua when
+// the request doesn't yet carry an HWID header. It collects/persists an HWID
+// and re-fetches the same URL with the X-Eternal-Device header so the server
+// can serve the protected source.
+export function ffaBootstrapLua(url) {
+  return `-- Voltra Auth FFA loader (no key required)
 local h=game:GetService("HttpService")
 local function stop(msg)
     pcall(function()
@@ -433,18 +444,18 @@ local ok,r=pcall(req,{
         ["X-Eternal-Execute"]="1"
     }
 })
-if not ok or not r then stop("Eternal Auth connection failed") return end
+if not ok or not r then stop("Voltra Auth connection failed") return end
 local code=tonumber(r.StatusCode or r.status_code or 0)
 local body=r.Body or r.body or ""
 if code~=200 then
-    stop(string.find(body,"Blacklisted",1,true) and "Blacklisted" or ("Eternal Auth denied access ("..tostring(code)..")"))
+    stop(string.find(body,"Blacklisted",1,true) and "Blacklisted" or ("Voltra Auth denied access ("..tostring(code)..")"))
     return
 end
 if type(loadstring)~="function" then stop("loadstring unavailable") return end
 local fn,err=loadstring(body)
 pcall(function() r.Body="" r.body="" end)
 body=nil
-if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
+if type(fn)~="function" then error("Voltra Auth loader compile error: "..tostring(err),0) end
 fn()`;
 }
 

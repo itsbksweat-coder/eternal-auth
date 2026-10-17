@@ -1,5 +1,5 @@
-# Eternal Auth verification
-name: Verify Eternal Auth
+# Voltra Auth verification
+name: Verify Voltra Auth
 
 on:
   push:

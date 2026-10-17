@@ -23,6 +23,44 @@ export class EternalGateway extends PrefixEternalGateway {
       this.fatal = false;
     }
 
+    // Internal RPC: fixed-window rate limiter shared across the Worker.
+    // All requests to the Worker come through one Durable Object instance
+    // (idFromName("eternal-auth-primary-gateway")), so this is a single
+    // counter per key, no cross-instance drift.
+    if (url.pathname === "/rate-check" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const kind = String(body?.kind || "");
+        const identifier = String(body?.id || "");
+        const limit = Math.max(1, Number(body?.limit || 5));
+        const windowSeconds = Math.max(1, Number(body?.window || 60));
+        if (!kind || !identifier) {
+          return new Response(JSON.stringify({ ok: false, error: "kind and id required" }), {
+            status: 400, headers: { "content-type": "application/json" },
+          });
+        }
+        const storageKey = `rl:${kind}:${identifier}`;
+        const nowSec = Math.floor(Date.now() / 1000);
+        const windowStart = nowSec - (nowSec % windowSeconds);
+        const current = await this.ctx.storage.get(storageKey);
+        let count = 0;
+        if (current && Number(current.window_start) === windowStart) {
+          count = Number(current.count || 0);
+        }
+        count += 1;
+        await this.ctx.storage.put(storageKey, { window_start: windowStart, count });
+        const allowed = count <= limit;
+        const retryAfter = allowed ? 0 : (windowStart + windowSeconds) - nowSec;
+        return new Response(JSON.stringify({
+          ok: true, allowed, remaining: Math.max(0, limit - count), retry_after: retryAfter,
+        }), { headers: { "content-type": "application/json" } });
+      } catch (error) {
+        return new Response(JSON.stringify({ ok: false, error: String(error?.message || error) }), {
+          status: 500, headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
     return super.fetch(request);
   }
 
@@ -39,12 +77,12 @@ export class EternalGateway extends PrefixEternalGateway {
         intents: 1 | (1 << 9) | (1 << 12),
         properties: {
           os: "linux",
-          browser: "Eternal Auth",
-          device: "Eternal Auth",
+          browser: "Voltra Auth",
+          device: "Voltra Auth",
         },
         presence: {
           since: null,
-          activities: [{ name: "Eternal Auth", type: 3 }],
+          activities: [{ name: "Voltra Auth", type: 3 }],
           status: "online",
           afk: false,
         },
@@ -57,7 +95,7 @@ export class EternalGateway extends PrefixEternalGateway {
       this.messageContentIntentEnabled = false;
       this.messageContentFallback = true;
       this.messageContentWarning =
-        "Discord rejected Message Content Intent (Gateway 4014). Eternal Auth reconnected without it; `.b` is disabled until Message Content Intent is enabled and the Gateway is reconnected.";
+        "Discord rejected Message Content Intent (Gateway 4014). Voltra Auth reconnected without it; `.b` is disabled until Message Content Intent is enabled and the Gateway is reconnected.";
 
       this.clearHeartbeat();
       this.clearReconnectTimer();

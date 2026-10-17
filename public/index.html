@@ -3,38 +3,21 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta name="theme-color" content="#121b36" />
-  <title>Eternal Auth</title>
+  <meta name="theme-color" content="#000000" />
+  <link rel="preload" href="/styles.css" as="style" />
+  <title>Voltra Auth</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <div class="app-backdrop"></div>
 
   <main class="page-wrap">
-    <section id="loginView" class="login-screen">
-      <article class="login-panel card">
-        <div class="login-brand">
-          <div class="brand-mark large">EA</div>
-          <div>
-            <span class="eyebrow">ADMIN PANEL</span>
-            <h1>Eternal Auth</h1>
-            <p>Sign in with your Cloudflare admin password to manage your projects.</p>
-          </div>
-        </div>
-        <form id="loginForm" class="stack login-form">
-          <input id="password" type="password" autocomplete="current-password" placeholder="Admin password" required />
-          <button class="primary" type="submit">Open dashboard</button>
-        </form>
-        <div id="loginMsg" class="msg"></div>
-      </article>
-    </section>
-
     <section id="appView" class="dashboard hidden">
       <aside class="sidebar">
         <div class="sidebar-brand card">
-          <div class="brand-mark">EA</div>
+          <div class="brand-mark">VA</div>
           <div>
-            <h2>Eternal Auth</h2>
+            <h2>Voltra Auth</h2>
             <p>License Management</p>
           </div>
         </div>
@@ -42,7 +25,7 @@
         <nav class="sidebar-nav card">
           <span class="nav-label">WORKSPACE</span>
           <button class="tab active" data-tab="gateway">Overview</button>
-          <button class="tab" type="button" onclick="location.href='/server-cleanup.html'">Moderation</button>
+          <button class="tab" type="button" data-nav="/server-cleanup.html">Moderation</button>
           <button class="tab" data-tab="serverkeys">Server Keys</button>
           <button class="tab" data-tab="licenses">Users</button>
           <button class="tab" data-tab="stock">Stock Keys</button>
@@ -62,7 +45,7 @@
       <section class="content-area">
         <header class="content-topbar card">
           <div>
-            <p class="crumb">Eternal Auth / <span id="sectionCrumb">Overview</span></p>
+            <p class="crumb">Voltra Auth / <span id="sectionCrumb">Overview</span></p>
             <h1 id="sectionTitle">Projects</h1>
           </div>
           <div class="workspace-controls">
@@ -113,10 +96,10 @@
           <div class="grid two">
             <article class="card panel-card">
               <div class="section-head">
-                <div><span class="eyebrow">DISCORD GATEWAY</span><h3>Eternal Auth presence</h3></div>
+                <div><span class="eyebrow">DISCORD GATEWAY</span><h3>Voltra Auth presence</h3></div>
                 <button id="wakeGatewayBtn" class="primary" type="button">Wake / Check bot</button>
               </div>
-              <p class="muted">A Cloudflare Durable Object keeps a Discord Gateway WebSocket open so Eternal Auth appears online while slash commands are handled by the Worker interaction endpoint.</p>
+              <p class="muted">A Cloudflare Durable Object keeps a Discord Gateway WebSocket open so Voltra Auth appears online while slash commands are handled by the Worker interaction endpoint.</p>
               <div class="info-grid">
                 <div class="info-tile"><span>Status</span><strong id="gatewayStatus">Checking…</strong></div>
                 <div class="info-tile"><span>Bot</span><strong id="gatewayBotSecondary">—</strong></div>
@@ -130,6 +113,18 @@
               <ul class="feature-list"><li>Free-plan friendly</li><li>Auto reconnect logic</li><li>Slash command support</li><li>Online bot presence</li></ul>
             </article>
           </div>
+
+          <article class="card panel-card">
+            <div class="section-head">
+              <div><span class="eyebrow">DISCORD</span><h3>Slash commands</h3></div>
+              <div class="actions">
+                <button id="syncDiscordCommands" class="primary" type="button">Sync commands</button>
+                <button id="resyncPanels" class="ghost" type="button">All</button>
+              </div>
+            </div>
+            <p class="muted"><b>Sync commands</b> — re-register every slash command with Discord from the current Worker definitions. Use after a Worker update changes a command's options.</p>
+            <p class="muted"><b>All</b> — resend every active panel in the loaded project to its original channel with the latest buttons and embed. Use after a panel's buttons stop working or the message got deleted.</p>
+          </article>
 
         </section>
 
@@ -159,7 +154,7 @@
           <div class="grid two">
             <article class="card panel-card">
               <span class="eyebrow">MANAGER ACTION</span><h3>Whitelist user</h3>
-              <form id="whitelistForm" class="stack compact"><input id="wlDiscord" placeholder="Discord user ID" required /><select id="wlPanel" required><option value="">Select panel</option></select><input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" /><input id="wlNote" placeholder="Note (optional)" /><button class="primary" type="submit">Whitelist</button><button class="ghost" id="syncDiscordCommands" type="button">Sync Discord panel option</button></form>
+              <form id="whitelistForm" class="stack compact"><input id="wlDiscord" placeholder="Discord user ID" required /><select id="wlPanel" required><option value="">Select panel</option></select><input id="wlDays" type="number" min="1" placeholder="Days (blank = lifetime)" /><input id="wlNote" placeholder="Note (optional)" /><button class="primary" type="submit">Whitelist</button></form>
             </article>
             <article class="card panel-card"><span class="eyebrow">PROJECT ACTION</span><h3>Compensate users</h3><form id="compensateForm" class="stack compact"><input id="compDays" type="number" min="1" max="3650" placeholder="Days to add" required /><button class="ghost" type="submit">Add days to timed keys</button></form></article>
           </div>
@@ -191,7 +186,7 @@
         <section class="tabpane hidden" data-pane="script">
           <article class="card panel-card scripts-project-card"><div class="section-head"><div><span class="eyebrow">PROJECT SCRIPTS</span><h3>Scripts</h3><p class="muted">Upload text-based script files. Each uploaded file becomes a protected script with its own loader URL.</p></div><div class="actions"><input id="scriptFileInput" class="hidden" type="file" accept=".txt,.lua,.luau,.md,.cfg,.ini,.json,.js,.ts,.xml,.yaml,.yml,.py,.rb,.sh,.ps1,.bat,.cmd,.toml,.conf,.log,text/plain,text/*" multiple /><button id="uploadScriptBtn" class="primary" type="button">⬆ Upload Script Files</button></div></div><div id="scriptCards" class="script-cards"></div></article>
           <div class="grid two">
-            <article class="card panel-card"><div class="section-head"><div><span class="eyebrow">PROJECT LOADER</span><h3>Loader template</h3></div></div><label>Template used when Eternal Auth sends a loader</label><textarea id="loaderTemplate" rows="7" spellcheck="false" placeholder="script_key = &quot;{{KEY}}&quot;&#10;loadstring(game:HttpGet(&quot;{{LOADER_URL}}&quot;))()"></textarea><p class="muted">Supported values: <code>{{KEY}}</code>, <code>{{BASE_URL}}</code>, and <code>{{LOADER_URL}}</code>.</p></article>
+            <article class="card panel-card"><div class="section-head"><div><span class="eyebrow">PROJECT LOADER</span><h3>Loader template</h3></div></div><label>Template used when Voltra Auth sends a loader</label><textarea id="loaderTemplate" rows="7" spellcheck="false" placeholder="script_key = &quot;{{KEY}}&quot;&#10;loadstring(game:HttpGet(&quot;{{LOADER_URL}}&quot;))()"></textarea><p class="muted">Supported values: <code>{{KEY}}</code>, <code>{{BASE_URL}}</code>, and <code>{{LOADER_URL}}</code>.</p></article>
             <article class="card panel-card" id="scriptEditorCard"><div class="section-head"><div><span class="eyebrow">SCRIPT EDITOR</span><h3 id="scriptEditorTitle">Select a script</h3></div><div class="actions"><label class="toggle"><input id="scriptEnabled" type="checkbox" checked /><span>Enabled</span></label><label class="toggle"><input id="scriptFfaEnabled" type="checkbox" /><span>FFA</span></label></div></div><form id="scriptForm" class="stack"><input id="scriptId" type="hidden" /><div class="grid two"><input id="scriptName" placeholder="Script name" /><input id="scriptVersion" placeholder="Version" /></div><label>Direct loader</label><div class="loader-row"><input id="rawLoaderUrl" readonly placeholder="Select a script" /><button class="ghost" id="copyRawLoaderUrlBtn" type="button">Copy Loader</button></div><label>Public loader loadstring</label><div class="loader-row"><input id="loaderUrl" readonly placeholder="Select a script" /><button class="ghost" id="copyLoaderUrlBtn" type="button">Copy Loadstring</button></div><label>FFA keyless loader</label><div class="loader-row"><input id="ffaLoaderUrl" readonly placeholder="Enable FFA and save" /><button class="ghost" id="copyFfaLoaderBtn" type="button">Copy FFA</button></div><label>Protected source file</label><div class="file-source-box"><div><strong id="scriptSourceStatus">Select a script</strong><p class="muted">Choose a file only when you want to replace the protected source. Leave it empty to update metadata only.</p></div><input id="updateScriptFileInput" type="file" accept=".txt,.lua,.luau,.md,.cfg,.ini,.json,.js,.ts,.xml,.yaml,.yml,.py,.rb,.sh,.ps1,.bat,.cmd,.toml,.conf,.log,text/plain,text/*" /></div><div class="actions editor-actions"><button class="primary" id="updateScriptBtn" type="submit">Update Script</button><button class="danger" id="deleteScriptBtn" type="button">Delete Script</button></div></form></article>
           </div>
         </section>
@@ -200,8 +195,8 @@
 
         <section class="tabpane hidden" data-pane="backend">
           <div class="grid two">
-            <article class="card panel-card"><div class="section-head"><div><span class="eyebrow">BACKEND STORAGE</span><h3>Persistent backend state</h3></div><button id="refreshBackendBtn" class="ghost" type="button">Refresh</button></div><p class="muted">Eternal Auth stores dashboard and project state in Cloudflare D1. Sensitive runtime secrets remain in Cloudflare Worker Secrets instead of being exposed to the browser.</p><div class="info-grid backend-info-grid"><div class="info-tile"><span>Admin credential</span><strong id="backendCredential">Checking…</strong></div><div class="info-tile"><span>Active sessions</span><strong id="backendSessions">—</strong></div><div class="info-tile"><span>Saved workspace</span><strong id="backendGuild">—</strong></div><div class="info-tile"><span>Saved page</span><strong id="backendTab">—</strong></div></div><div class="backend-storage-list"><div><b>D1:</b> guilds, scripts, licenses, HWID hashes, blacklists, setup keys, audit logs, dashboard state, admin credential hash and sessions.</div><div><b>Encrypted in D1:</b> full newly-created server setup keys and log webhook configuration.</div><div><b>Worker Secrets:</b> Discord bot token, Discord public/application keys, license derivation secret, HWID pepper and encryption key.</div></div></article>
-            <article class="card panel-card"><span class="eyebrow">ADMIN ACCOUNT</span><h3>Change admin password</h3><p class="muted">The admin password is never stored as plaintext. Eternal Auth stores a PBKDF2-SHA256 password hash and random salt in D1.</p><form id="adminPasswordForm" class="stack compact"><input id="currentAdminPassword" type="password" autocomplete="current-password" placeholder="Current admin password" required /><input id="newAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="New admin password (12+ characters)" required /><input id="confirmAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="Confirm new admin password" required /><button class="primary" type="submit">Change admin password</button></form><p class="muted">Changing the password revokes every active admin session and signs this browser out.</p></article>
+            <article class="card panel-card"><div class="section-head"><div><span class="eyebrow">BACKEND STORAGE</span><h3>Persistent backend state</h3></div><button id="refreshBackendBtn" class="ghost" type="button">Refresh</button></div><p class="muted">Voltra Auth stores dashboard and project state in Cloudflare D1. Sensitive runtime secrets remain in Cloudflare Worker Secrets instead of being exposed to the browser.</p><div class="info-grid backend-info-grid"><div class="info-tile"><span>Admin credential</span><strong id="backendCredential">Checking…</strong></div><div class="info-tile"><span>Active sessions</span><strong id="backendSessions">—</strong></div><div class="info-tile"><span>Saved workspace</span><strong id="backendGuild">—</strong></div><div class="info-tile"><span>Saved page</span><strong id="backendTab">—</strong></div></div><div class="backend-storage-list"><div><b>D1:</b> guilds, scripts, licenses, HWID hashes, blacklists, setup keys, audit logs, dashboard state, admin credential hash and sessions.</div><div><b>Encrypted in D1:</b> full newly-created server setup keys and log webhook configuration.</div><div><b>Worker Secrets:</b> Discord bot token, Discord public/application keys, license derivation secret, HWID pepper and encryption key.</div></div></article>
+            <article class="card panel-card"><span class="eyebrow">ADMIN ACCOUNT</span><h3>Change admin password</h3><p class="muted">The admin password is never stored as plaintext. Voltra Auth stores a PBKDF2-SHA256 password hash and random salt in D1.</p><form id="adminPasswordForm" class="stack compact"><input id="currentAdminPassword" type="password" autocomplete="current-password" placeholder="Current admin password" required /><input id="newAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="New admin password (12+ characters)" required /><input id="confirmAdminPassword" type="password" autocomplete="new-password" minlength="12" placeholder="Confirm new admin password" required /><button class="primary" type="submit">Change admin password</button></form><p class="muted">Changing the password revokes every active admin session and signs this browser out.</p></article>
           </div>
           <article class="card panel-card"><span class="eyebrow">RUNTIME SNAPSHOT</span><h3>Last persisted Gateway state</h3><div class="info-grid"><div class="info-tile"><span>Snapshot</span><strong id="backendGatewaySnapshot">—</strong></div><div class="info-tile"><span>Updated</span><strong id="backendGatewayUpdated">—</strong></div></div></article>
         </section>

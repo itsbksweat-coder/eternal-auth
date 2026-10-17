@@ -395,19 +395,31 @@ function renderLogs(rows = []) {
   $("#logRows").innerHTML = rows.length ? rows.map(r => `<tr><td>${esc(fmtTime(r.created_at))}</td><td>${esc(r.action)}</td><td>${esc(r.actor_id || "—")}</td><td>${esc(r.target || "—")}</td><td><code>${esc(r.details || "{}")}</code></td></tr>`).join("") : `<tr><td colspan="5" class="empty">No audit logs yet.</td></tr>`;
 }
 
-$("#loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const out = $("#loginMsg");
+// Session bootstrap: if a valid __Host-vol_session cookie is already set we
+// pick up the CSRF token and reveal the dashboard. If not, bounce the user
+// to the standalone /login page so they never see an in-page login form.
+async function bootstrapSession() {
   try {
-    const data = await api("/api/admin/login", { method: "POST", body: JSON.stringify({ password: $("#password").value }) });
-    csrfToken = String(data?.csrf || "");
-    $("#loginView").classList.add("hidden"); $("#appView").classList.remove("hidden"); $("#logoutBtn").classList.remove("hidden");
-    out.textContent = "";
-    await loadBackendState();
-    await Promise.all([loadServerKeys(), loadGatewayStatus(false), loadBackendStatus(false)]);
-    if (currentGuild) await loadProject();
-  } catch (err) { out.textContent = err.message; out.className = "msg error"; }
-});
+    const res = await fetch("/api/admin/csrf", { method: "GET" });
+    if (res.status === 401) {
+      location.replace("/login");
+      return false;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data?.ok || !data.csrf) {
+      location.replace("/login");
+      return false;
+    }
+    csrfToken = String(data.csrf);
+    $("#appView").classList.remove("hidden");
+    $("#logoutBtn").classList.remove("hidden");
+    return true;
+  } catch (err) {
+    location.replace("/login");
+    return false;
+  }
+}
 
 $("#wakeGatewayBtn").onclick = async () => {
   try {
@@ -705,8 +717,14 @@ $$('[data-tab]').forEach(btn => btn.onclick = () => setActiveTab(btn, true));
 $$('[data-nav]').forEach(btn => btn.onclick = () => { location.href = btn.dataset.nav; });
 
 (async () => {
-  // No project/admin state is stored in localStorage. Backend state is restored after login.
   $("#guildId").value = "";
   const active = $('[data-tab].active') || $('[data-tab]');
   if (active) setActiveTab(active, false);
+  const authed = await bootstrapSession();
+  if (!authed) return;
+  try {
+    await loadBackendState();
+    await Promise.all([loadServerKeys(), loadGatewayStatus(false), loadBackendStatus(false)]);
+    if (currentGuild) await loadProject();
+  } catch (err) { msg(err.message, "error"); }
 })();

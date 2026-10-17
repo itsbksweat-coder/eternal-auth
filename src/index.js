@@ -485,11 +485,34 @@ async function serveWebsiteAsset(request, env) {
   }
 
   try {
-    let response = await env.ASSETS.fetch(request);
     const url = new URL(request.url);
     const accept = (request.headers.get("accept") || "").toLowerCase();
     const wantsHtml = request.method === "GET" && (accept.includes("text/html") || accept.includes("application/xhtml+xml"));
     const looksLikeFile = /\/[^/]+\.[a-z0-9]{1,12}$/i.test(url.pathname);
+
+    // Dedicated login page at /login — served from public/login.html.
+    if (wantsHtml && (url.pathname === "/login" || url.pathname === "/login/")) {
+      const loginUrl = new URL("/login.html", request.url);
+      const loginResp = await env.ASSETS.fetch(new Request(loginUrl, { method: "GET", headers: request.headers }));
+      return withSecurityHeaders(loginResp);
+    }
+
+    // Server-side gate: for a browser navigating to a page route (not an asset
+    // file, not /login, not an api/files endpoint), bounce them to /login if
+    // they do not already have a valid admin session. Keeps the dashboard
+    // behind the cookie even before any JS runs.
+    if (wantsHtml && !looksLikeFile && !url.pathname.startsWith("/api/") && !url.pathname.startsWith("/files/") && !url.pathname.startsWith("/discord/")) {
+      let session = null;
+      try { session = await verifyAdminSession(request, env); } catch {}
+      if (!session) {
+        return withSecurityHeaders(new Response(null, {
+          status: 302,
+          headers: { location: "/login", "cache-control": "no-store" },
+        }));
+      }
+    }
+
+    let response = await env.ASSETS.fetch(request);
 
     // SPA/browser fallback: if a normal page route is not a concrete asset,
     // serve the real Voltra Auth index instead of surfacing a Worker 500/404.

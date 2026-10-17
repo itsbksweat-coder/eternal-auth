@@ -2643,12 +2643,25 @@ async function verifyAdminPassword(env, password) {
   return diff === 0;
 }
 
-// Session cookie name uses the __Host- prefix to opt into the browser's
-// strictest first-party rules (requires Secure, Path=/, and no Domain attr).
-// Any older ea_session cookie in the browser is harmless; it never matches
-// the new backend-side token hash column, so it just expires on its own.
-const SESSION_COOKIE_NAME = "__Host-vol_session";
-const SESSION_COOKIE_REGEX = /(?:^|;\s*)__Host-vol_session=([^;]+)/;
+// Session cookie obfuscation.
+//
+// The browser only ever sees opaque-looking cookies with random names and
+// random-looking values. The *real* session identifier is one of them, but
+// the server picks it by name — the others are decoys with freshly generated
+// random values on every login. Nothing sensitive about the admin lives in
+// the cookie: it is a lookup token whose SHA-256 is stored in admin_sessions
+// and compared timing-safely. The source of truth for "is this session valid,
+// what CSRF token does it have, when does it expire" is D1, not the cookie.
+//
+// Why no __Host- prefix anymore: the user wants the cookie to look like any
+// other arbitrary cookie, not something that announces "admin session". We
+// still manually set Secure + HttpOnly + SameSite=Strict + Path=/, so the
+// only property we lose is the browser's enforcement that no other code can
+// set a cookie with the same name without those flags — a tiny concern on a
+// Workers subdomain where no sibling scripts share the origin.
+const SESSION_COOKIE_NAME = "_vq7a3k2m";
+const SESSION_COOKIE_REGEX = /(?:^|;\s*)_vq7a3k2m=([^;]+)/;
+const DECOY_COOKIE_NAMES = ["_nb4p9x1", "_mt6c2w8", "_zh5r0d7", "_fj1k8e3"];
 const SESSION_TTL_SECONDS = 12 * 3600;
 const SESSION_IDLE_SECONDS = 2 * 3600;
 const SESSION_COOKIE_FLAGS = "HttpOnly; Secure; SameSite=Strict; Path=/";
@@ -2657,6 +2670,20 @@ function adminSessionCookieToken(request) {
   const cookie = request.headers.get("cookie") || "";
   const match = cookie.match(SESSION_COOKIE_REGEX);
   return match ? match[1] : null;
+}
+
+// Build Set-Cookie headers: one real cookie plus a cluster of decoys that
+// look identical in format. Pass sessionToken = "" to clear everything.
+function sessionCookieHeaders(sessionToken) {
+  const clearing = !sessionToken;
+  const realValue = clearing ? "" : sessionToken;
+  const maxAge = clearing ? 0 : SESSION_TTL_SECONDS;
+  const headers = [[`${SESSION_COOKIE_NAME}=${realValue}; ${SESSION_COOKIE_FLAGS}; Max-Age=${maxAge}`]];
+  for (const name of DECOY_COOKIE_NAMES) {
+    const decoyValue = clearing ? "" : bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+    headers.push([`${name}=${decoyValue}; ${SESSION_COOKIE_FLAGS}; Max-Age=${maxAge}`]);
+  }
+  return headers.map((pair) => pair[0]);
 }
 
 async function createAdminSession(env) {
@@ -2708,9 +2735,7 @@ async function handleAdminLogin(request, env) {
     return json({ ok: false, error: "Invalid password" }, 401);
   }
   const session = await createAdminSession(env);
-  return json({ ok: true, backend_persisted: true, csrf: session.csrf }, 200, {
-    "set-cookie": `${SESSION_COOKIE_NAME}=${session.token}; ${SESSION_COOKIE_FLAGS}; Max-Age=${SESSION_TTL_SECONDS}`,
-  });
+  return jsonWithCookies({ ok: true, backend_persisted: true, csrf: session.csrf }, 200, sessionCookieHeaders(session.token));
 }
 
 async function handleAdminLogout(request, env) {
@@ -2719,9 +2744,16 @@ async function handleAdminLogout(request, env) {
     const tokenHash = await sha256Hex(rawToken);
     await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
   }
-  return json({ ok: true }, 200, {
-    "set-cookie": `${SESSION_COOKIE_NAME}=; ${SESSION_COOKIE_FLAGS}; Max-Age=0`,
-  });
+  return jsonWithCookies({ ok: true }, 200, sessionCookieHeaders(""));
+}
+
+// json() can only carry one set-cookie header via its extraHeaders map.
+// Login and logout need to set several (one real + N decoys) in one response,
+// so this helper constructs the Response manually and appends each cookie.
+function jsonWithCookies(body, status, cookieHeaders) {
+  const headers = new Headers({ ...JSON_HEADERS });
+  for (const cookie of cookieHeaders || []) headers.append("set-cookie", cookie);
+  return withSecurityHeaders(new Response(JSON.stringify(body), { status, headers }));
 }
 
 async function handleAdminCsrf(session) {
@@ -2888,9 +2920,7 @@ async function handleAdminApi(request, env, url, ctx) {
     ).bind(bytesToBase64Url(salt), bytesToBase64Url(hash), ADMIN_PASSWORD_ITERATIONS, now()).run();
     await env.DB.prepare("DELETE FROM admin_sessions").run();
     await audit(env, null, "admin.password_changed", "dashboard", "primary", {});
-    return json({ ok: true, reauthenticate: true }, 200, {
-      "set-cookie": `${SESSION_COOKIE_NAME}=; ${SESSION_COOKIE_FLAGS}; Max-Age=0`,
-    });
+    return jsonWithCookies({ ok: true, reauthenticate: true }, 200, sessionCookieHeaders(""));
   }
 
   if (url.pathname === "/api/admin/backend/status" && request.method === "GET") {

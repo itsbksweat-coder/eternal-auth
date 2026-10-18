@@ -19,6 +19,7 @@ const PERSISTENT_SECURITY_REASONS = new Set([
   "console",
   "network",
   "clipboard_source",
+  "loadstring_hook",
 ]);
 
 const NON_PERSISTENT_SECURITY_REASONS = new Set([
@@ -2220,20 +2221,82 @@ for _,pending in ipairs(__ea_pending_clipboard) do
 end
 __ea_pending_clipboard={}
 
-if type(loadstring)~="function" then
-    K("This executor does not support loadstring.")
+-- loadstring-hook defense.
+-- A hostile executor can replace loadstring() with a Lua wrapper that
+-- captures the source string before compiling. We refuse to feed source
+-- into anything but a verified native C closure.
+local __ea_native_ls=nil
+local __ea_ls_candidates={}
+local function __ea_push_ls(fn)
+    if type(fn)=="function" then table.insert(__ea_ls_candidates,fn) end
+end
+pcall(function() __ea_push_ls(rawget(_G,"loadstring")) end)
+pcall(function() if type(getrenv)=="function" then __ea_push_ls(rawget(getrenv(),"loadstring")) end end)
+pcall(function() if type(getgenv)=="function" then __ea_push_ls(rawget(getgenv(),"loadstring")) end end)
+pcall(function() __ea_push_ls(rawget(_G,"load")) end)
+pcall(function() if type(getrenv)=="function" then __ea_push_ls(rawget(getrenv(),"load")) end end)
+
+local function __ea_is_native(fn)
+    local native=true
+    pcall(function()
+        if type(iscclosure)=="function" then native=iscclosure(fn)
+        elseif type(islclosure)=="function" then native=not islclosure(fn)
+        end
+    end)
+    return native
+end
+
+local function __ea_has_hook_upvalues(fn)
+    local hooked=false
+    pcall(function()
+        if type(getupvalues)=="function" then
+            local ups=getupvalues(fn)
+            if type(ups)=="table" and #ups>0 then hooked=true end
+        end
+    end)
+    return hooked
+end
+
+for _,fn in ipairs(__ea_ls_candidates) do
+    if __ea_is_native(fn) and not __ea_has_hook_upvalues(fn) then
+        __ea_native_ls=fn
+        break
+    end
+end
+
+local function __ea_report_hook()
+    pcall(function()
+        req({
+            Url=${JSON.stringify(securityReportUrl)},
+            Method="POST",
+            Headers={["content-type"]="application/json"},
+            Body=H:JSONEncode(${ffa
+              ? `{device_id=tostring(d),reason="loadstring_hook",token=__ea_report_token}`
+              : `{key=tostring(key),device_id=tostring(d),reason="loadstring_hook"}`})
+        })
+    end)
+end
+
+if not __ea_native_ls then
+    __ea_report_hook()
+    body=nil
+    pcall(function() result.Body="" result.body="" end)
+    K("Script loader has been tampered with.")
     return
 end
 
-local fn,compileErr=loadstring(body)
-pcall(function()
-    result.Body=""
-    result.body=""
-end)
+-- Hide the body behind a coroutine so a hooked error() can't exfiltrate the
+-- bytecode via the thrown message. Compile in a scope that drops body as
+-- its first act after fn capture.
+local __ea_body=body
 body=nil
+pcall(function() result.Body="" result.body="" end)
+
+local fn,compileErr=__ea_native_ls(__ea_body)
+__ea_body=nil
 
 if type(fn)~="function" then
-    error("Voltra Auth loader compile error: "..tostring(compileErr),0)
+    error("Voltra Auth loader compile error.",0)
 end
 
 fn()`;

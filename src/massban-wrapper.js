@@ -83,7 +83,7 @@ async function verifyDiscordInteraction(request, rawBody, env) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-Massban/1.1",
+    "user-agent": "VoltraAuth-Massban/1.1",
     ...extra,
   };
 }
@@ -188,7 +188,7 @@ async function listGuildMembers(env, guildId) {
     if (!response.ok || !Array.isArray(data)) {
       const detail = data?.message ? `: ${data.message}` : "";
       if (response.status === 403) {
-        throw new Error(`Discord denied the member list${detail}. Enable the Server Members Intent for Eternal Auth.`);
+        throw new Error(`Discord denied the member list${detail}. Enable the Server Members Intent for Voltra Auth.`);
       }
       throw new Error(`Could not read server members (HTTP ${response.status})${detail}.`);
     }
@@ -232,10 +232,10 @@ async function massBanGuild(env, guildId, actorId) {
   const guild = guildResult.data;
   const bot = botResult.data;
   if (!guildResult.response.ok || !guild?.id) {
-    throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Eternal Auth is actually in that server.`);
+    throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Voltra Auth is actually in that server.`);
   }
   if (!botResult.response.ok || !bot?.id) {
-    throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+    throw new Error(bot?.message || `Could not identify Voltra Auth (HTTP ${botResult.response.status}).`);
   }
 
   const botMemberResult = await discordJson(
@@ -246,7 +246,7 @@ async function massBanGuild(env, guildId, actorId) {
   if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
     throw new Error(
       botMemberResult.data?.message
-        || `Could not read Eternal Auth's server member record (HTTP ${botMemberResult.response.status}).`,
+        || `Could not read Voltra Auth's server member record (HTTP ${botMemberResult.response.status}).`,
     );
   }
 
@@ -260,7 +260,7 @@ async function massBanGuild(env, guildId, actorId) {
       !canBan ? "Ban Members" : null,
       !canManageGuild ? "Manage Server" : null,
     ].filter(Boolean).join(" + ");
-    throw new Error(`Eternal Auth is missing ${missing} in ${guild.name || guildId}. Discord requires both permissions for bulk bans.`);
+    throw new Error(`Voltra Auth is missing ${missing} in ${guild.name || guildId}. Discord requires both permissions for bulk bans.`);
   }
 
   const members = await listGuildMembers(env, guildId);
@@ -284,7 +284,7 @@ async function massBanGuild(env, guildId, actorId) {
 
   for (let offset = 0; offset < targets.length; offset += 50) {
     const batch = targets.slice(offset, offset + 50);
-    const auditReason = encodeURIComponent(`Eternal Auth massban by ${actorId || "dashboard"}`.slice(0, 480));
+    const auditReason = encodeURIComponent(`Voltra Auth massban by ${actorId || "dashboard"}`.slice(0, 480));
     const { response, data } = await discordJson(env, `/guilds/${encodeURIComponent(guildId)}/bulk-ban`, {
       method: "POST",
       headers: { "x-audit-log-reason": auditReason },
@@ -294,7 +294,7 @@ async function massBanGuild(env, guildId, actorId) {
     if (!response.ok) {
       const detail = data?.message ? `: ${data.message}` : "";
       if (response.status === 403) {
-        throw new Error(`Discord rejected the bulk ban${detail}. Check Eternal Auth's Ban Members + Manage Server permissions and move its role above the members you want it to moderate.`);
+        throw new Error(`Discord rejected the bulk ban${detail}. Check Voltra Auth's Ban Members + Manage Server permissions and move its role above the members you want it to moderate.`);
       }
       if (Number(data?.code) === 500000 || String(data?.message || "").toLowerCase().includes("failed to ban users")) {
         failed += batch.length;
@@ -371,7 +371,7 @@ async function maybeHandleMassban(request, env, ctx) {
     return json({
       type: 4,
       data: {
-        content: "You can see `/massban`, but only an Eternal Auth manager, server administrator, or the configured owner account can run it.",
+        content: "You can see `/massban`, but only an Voltra Auth manager, server administrator, or the configured owner account can run it.",
         flags: EPHEMERAL,
         allowed_mentions: { parse: [] },
       },
@@ -401,7 +401,7 @@ async function maybeHandleDashboardMassban(request, env, ctx) {
   if (url.pathname !== "/api/admin/server-cleanup" || request.method !== "POST") return null;
 
   if (!await dashboardSessionAuthorized(request, env, ctx)) {
-    return json({ ok: false, error: "Sign in to Eternal Auth first." }, 401);
+    return json({ ok: false, error: "Sign in to Voltra Auth first." }, 401);
   }
 
   let body = {};

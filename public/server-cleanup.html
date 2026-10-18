@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta name="theme-color" content="#121b36" />
-  <title>Eternal Auth • Moderation</title>
+  <meta name="theme-color" content="#000000" />
+  <title>Voltra Auth • Moderation</title>
   <link rel="stylesheet" href="/styles.css" />
   <style>
     select { width: 100%; }
@@ -18,7 +18,7 @@
     <section class="content-area">
       <header class="content-topbar card">
         <div>
-          <p class="crumb">Eternal Auth / Moderation</p>
+          <p class="crumb">Voltra Auth / Moderation</p>
           <h1>Ban & Unban</h1>
         </div>
         <div class="toolbar-actions">
@@ -84,7 +84,7 @@
       catch { data = { ok: false, error: `HTTP ${res.status}` }; }
       if (res.status === 401) {
         location.href = "/";
-        throw new Error("Sign in to Eternal Auth first.");
+        throw new Error("Sign in to Voltra Auth first.");
       }
       if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
       return data;

@@ -16,7 +16,7 @@ function sleep(ms) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-DMPrefixMassban/1.1",
+    "user-agent": "VoltraAuth-DMPrefixMassban/1.1",
     ...extra,
   };
 }
@@ -144,7 +144,7 @@ async function banSingleUser(env, targetUserId, actorId) {
     throw new Error(guild?.message || `Could not load target server (HTTP ${guildResult.response.status}).`);
   }
   if (!botResult.response.ok || !bot?.id) {
-    throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+    throw new Error(bot?.message || `Could not identify Voltra Auth (HTTP ${botResult.response.status}).`);
   }
 
   const protectedIds = new Set([
@@ -165,17 +165,17 @@ async function banSingleUser(env, targetUserId, actorId) {
   );
 
   if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
-    throw new Error(`Could not read Eternal Auth's member record (HTTP ${botMemberResult.response.status}).`);
+    throw new Error(`Could not read Voltra Auth's member record (HTTP ${botMemberResult.response.status}).`);
   }
 
   const permissions = effectivePermissions(guild, botMemberResult.data);
   const administrator = (permissions & ADMINISTRATOR) === ADMINISTRATOR;
   const canBan = administrator || (permissions & BAN_MEMBERS) === BAN_MEMBERS;
   if (!canBan) {
-    throw new Error("Eternal Auth needs Ban Members in the target server.");
+    throw new Error("Voltra Auth needs Ban Members in the target server.");
   }
 
-  const reason = encodeURIComponent(`Eternal Auth .b ${targetUserId} by ${actorId}`.slice(0, 480));
+  const reason = encodeURIComponent(`Voltra Auth .b ${targetUserId} by ${actorId}`.slice(0, 480));
   const query = new URLSearchParams({ delete_message_seconds: "0" });
   const { response, data } = await discordJson(
     env,
@@ -189,7 +189,7 @@ async function banSingleUser(env, targetUserId, actorId) {
   if (!response.ok) {
     const detail = data?.message ? `: ${data.message}` : "";
     if (response.status === 403) {
-      throw new Error(`Discord refused to ban ${targetUserId}${detail}. Check Eternal Auth's Ban Members permission and role position.`);
+      throw new Error(`Discord refused to ban ${targetUserId}${detail}. Check Voltra Auth's Ban Members permission and role position.`);
     }
     throw new Error(`Ban failed (HTTP ${response.status})${detail}.`);
   }
@@ -212,7 +212,7 @@ async function runDmMassban(env, actorId) {
     throw new Error(guild?.message || `Could not load target server (HTTP ${guildResult.response.status}).`);
   }
   if (!botResult.response.ok || !bot?.id) {
-    throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+    throw new Error(bot?.message || `Could not identify Voltra Auth (HTTP ${botResult.response.status}).`);
   }
 
   const botMemberResult = await discordJson(
@@ -221,7 +221,7 @@ async function runDmMassban(env, actorId) {
     { method: "GET" },
   );
   if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
-    throw new Error(`Could not read Eternal Auth's member record (HTTP ${botMemberResult.response.status}).`);
+    throw new Error(`Could not read Voltra Auth's member record (HTTP ${botMemberResult.response.status}).`);
   }
 
   const permissions = effectivePermissions(guild, botMemberResult.data);
@@ -229,7 +229,7 @@ async function runDmMassban(env, actorId) {
   const canBan = administrator || (permissions & BAN_MEMBERS) === BAN_MEMBERS;
   const canManage = administrator || (permissions & MANAGE_GUILD) === MANAGE_GUILD;
   if (!canBan || !canManage) {
-    throw new Error("Eternal Auth needs Ban Members and Manage Server in the target server.");
+    throw new Error("Voltra Auth needs Ban Members and Manage Server in the target server.");
   }
 
   const members = await listGuildMembers(env);
@@ -252,7 +252,7 @@ async function runDmMassban(env, actorId) {
     const batch = targets.slice(offset, offset + BATCH_SIZE);
     batches += 1;
 
-    const reason = encodeURIComponent(`Eternal Auth .b DM by ${actorId}`.slice(0, 480));
+    const reason = encodeURIComponent(`Voltra Auth .b DM by ${actorId}`.slice(0, 480));
     const { response, data } = await discordJson(
       env,
       `/guilds/${encodeURIComponent(TARGET_GUILD_ID)}/bulk-ban`,

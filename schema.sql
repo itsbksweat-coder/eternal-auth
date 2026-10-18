@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS guilds (
 CREATE TABLE IF NOT EXISTS panels (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
-  name TEXT NOT NULL DEFAULT 'Eternal Auth Panel',
+  name TEXT NOT NULL DEFAULT 'Voltra Auth Panel',
   channel_id TEXT,
   manager_role_id TEXT,
   buyer_role_id TEXT,
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS scripts (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
   loader_id TEXT UNIQUE,
-  name TEXT NOT NULL DEFAULT 'Eternal Auth Script',
+  name TEXT NOT NULL DEFAULT 'Voltra Auth Script',
   version TEXT NOT NULL DEFAULT '1.0.0',
   enabled INTEGER NOT NULL DEFAULT 1,
   ffa_enabled INTEGER NOT NULL DEFAULT 0,

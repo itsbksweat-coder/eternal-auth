@@ -460,6 +460,25 @@ $("#wakeGatewayBtn").onclick = async () => {
 };
 
 $("#logoutBtn").onclick = async () => { try { await api("/api/admin/logout", { method: "POST", body: "{}" }); } catch {} clearToken(); location.replace("/login"); };
+
+$("#blacklistKeyForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const gid = $("#guildId").value.trim();
+  const key = $("#blKey").value.trim();
+  const reason = $("#blKeyReason").value.trim() || "manual_dump";
+  if (!gid) return msg("Load a project first.", "error");
+  if (!key) return msg("Paste the leaked key.", "error");
+  if (!confirm(`Permanently blacklist key ${key.slice(0, 12)}...? This bans the Discord user, their HWID, and voids the key.`)) return;
+  try {
+    const data = await api("/api/admin/licenses/blacklist-by-key", { method: "POST", body: JSON.stringify({ guild_id: gid, key, reason }) });
+    const parts = [`Key voided`];
+    for (const t of data.banned || []) parts.push(`${t.kind}: ${t.id}`);
+    if (!data.had_hwid) parts.push("no HWID was bound yet — attacker's device will be caught on next request");
+    msg(parts.join(" • "), "success");
+    $("#blKey").value = ""; $("#blKeyReason").value = "";
+    await loadProject();
+  } catch (err) { msg(err.message, "error"); }
+});
 $("#loadBtn").onclick = loadProject;
 $("#refreshBtn").onclick = loadProject;
 $("#licenseSearch").addEventListener("input", () => renderLicenses(window.__licenseRows || []));

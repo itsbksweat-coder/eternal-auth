@@ -3186,6 +3186,52 @@ async function handleAdminApi(request, env, url, ctx) {
     return json({ ok: true, license });
   }
 
+  // Blacklist by raw license key.
+  // Takes { guild_id, key, reason? } and in one call: hashes the key, looks up
+  // the license, blacklists the Discord user, persistently blacklists the HWID
+  // on hwid_blacklists, and deletes the license so the key can never be used
+  // again. The right thing to call when you have an attacker's actual key.
+  if (url.pathname === "/api/admin/licenses/blacklist-by-key" && request.method === "POST") {
+    const body = await readJson(request);
+    const guildId = cleanText(body?.guild_id, 64);
+    const rawKey = cleanText(body?.key, 512);
+    const reason = cleanText(body?.reason, 300) || "manual_dump";
+    if (!guildId) return json({ ok: false, error: "guild_id is required" }, 400);
+    if (!rawKey) return json({ ok: false, error: "key is required" }, 400);
+
+    const keyHash = await sha256Hex(rawKey);
+    const row = await env.DB.prepare(
+      "SELECT id, guild_id, discord_id, hwid_hash FROM licenses WHERE guild_id = ? AND key_hash = ? LIMIT 1"
+    ).bind(guildId, keyHash).first();
+    if (!row) return json({ ok: false, error: "No license found for that key in this project" }, 404);
+
+    const timestamp = now();
+    const banTargets = [];
+
+    if (row.discord_id) {
+      await env.DB.prepare(
+        `INSERT INTO blacklists (guild_id, discord_id, reason, expires_at, created_at)
+         VALUES (?, ?, ?, -1, ?)
+         ON CONFLICT(guild_id, discord_id) DO UPDATE SET reason = excluded.reason, expires_at = -1`
+      ).bind(guildId, row.discord_id, reason, timestamp).run();
+      banTargets.push({ kind: "discord", id: row.discord_id });
+    }
+
+    if (row.hwid_hash) {
+      await env.DB.prepare(
+        `INSERT INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(guild_id, hwid_hash) DO UPDATE SET reason = excluded.reason`
+      ).bind(guildId, row.hwid_hash, reason, row.id, timestamp).run();
+      banTargets.push({ kind: "hwid", id: `${String(row.hwid_hash).slice(0, 8)}...` });
+    }
+
+    await env.DB.prepare("DELETE FROM licenses WHERE id = ?").bind(row.id).run();
+    await audit(env, guildId, "admin.blacklist_by_key", "dashboard", row.discord_id || row.id, { reason, discord_id: row.discord_id, had_hwid: !!row.hwid_hash });
+
+    return json({ ok: true, license_id: row.id, banned: banTargets, had_hwid: !!row.hwid_hash });
+  }
+
   const licenseMatch = url.pathname.match(/^\/api\/admin\/licenses\/([^/]+)(?:\/(reset-hwid))?$/);
   if (licenseMatch) {
     const id = decodeURIComponent(licenseMatch[1]);

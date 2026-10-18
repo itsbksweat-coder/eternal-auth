@@ -20,6 +20,7 @@ const PERSISTENT_SECURITY_REASONS = new Set([
   "network",
   "clipboard_source",
   "loadstring_hook",
+  "scrape_rate_abuse",
 ]);
 
 const NON_PERSISTENT_SECURITY_REASONS = new Set([
@@ -798,6 +799,61 @@ function clientIp(request) {
   );
 }
 
+// Auto-blacklist a key + HWID + Discord user when the loader rate limit is
+// breached. The pattern (many /api/v1/loader hits in a short window with the
+// same key) is the signature of a diff-style dump attack; no legitimate
+// executor needs to re-fetch the authenticated loader multiple times per
+// minute. Logs the breach and deletes the license so the key dies instantly.
+async function autoBlacklistForScrape({ env, request, key, deviceId, reason = "scrape_rate_abuse" }) {
+  try {
+    if (!env?.DB || !key) return;
+    const keyHash = await sha256Hex(key);
+    const row = await env.DB.prepare(
+      "SELECT id, guild_id, discord_id, hwid_hash FROM licenses WHERE key_hash = ? LIMIT 1"
+    ).bind(keyHash).first();
+    if (!row) return;
+
+    const timestamp = now();
+    const ip = clientIp(request);
+    const detail = { reason, ip, hwid_hint: row.hwid_hash ? String(row.hwid_hash).slice(0, 8) : null };
+
+    if (row.discord_id) {
+      await env.DB.prepare(
+        `INSERT INTO blacklists (guild_id, discord_id, reason, expires_at, created_at)
+         VALUES (?, ?, ?, -1, ?)
+         ON CONFLICT(guild_id, discord_id) DO UPDATE SET reason = excluded.reason, expires_at = -1`
+      ).bind(row.guild_id, row.discord_id, reason, timestamp).run();
+    }
+
+    if (row.hwid_hash) {
+      await env.DB.prepare(
+        `INSERT INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(guild_id, hwid_hash) DO UPDATE SET reason = excluded.reason`
+      ).bind(row.guild_id, row.hwid_hash, reason, row.id, timestamp).run();
+    } else if (deviceId) {
+      // Even if the license never bound an HWID yet, the attacker just told us
+      // their device via the X-Eternal-Device header on the breached request.
+      try {
+        const hwidHash = await hashDevice(env, deviceId);
+        if (hwidHash) {
+          await env.DB.prepare(
+            `INSERT INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(guild_id, hwid_hash) DO UPDATE SET reason = excluded.reason`
+          ).bind(row.guild_id, hwidHash, reason, row.id, timestamp).run();
+        }
+      } catch {}
+    }
+
+    await env.DB.prepare("DELETE FROM licenses WHERE id = ?").bind(row.id).run();
+    await audit(env, row.guild_id, "auto.scrape_blacklist", "server", row.discord_id || row.id, detail);
+    console.warn("Auto-blacklist for scrape", row.guild_id, row.discord_id, detail);
+  } catch (error) {
+    console.error("autoBlacklistForScrape failed", error);
+  }
+}
+
 function now() {
   return Math.floor(Date.now() / 1000);
 }
@@ -1433,10 +1489,19 @@ async function handleProtectedLoader(request, env, ctx) {
   if (!key) return deniedSource("Missing key");
   if (!deviceId) return deniedSource("Missing HWID");
 
-  // No per-IP rate-limit on this path. The loader ticket is HMAC-signed and
-  // single-use (replay-protected by sha256(token) lookup in verifyLoaderTicket),
-  // so each legitimate fetch is cryptographically bounded and automated
-  // scraping gets denied at the ticket step, not after a DO round trip.
+  // Per-key rate limit on the authenticated loader. A legitimate executor
+  // calls this once per game join (minutes between calls). Any key hitting
+  // this endpoint more than a handful of times in 60s is almost certainly
+  // a dump workflow doing diff attacks across obfuscated outputs. On breach
+  // we auto-blacklist the license, the HWID (if bound), and the Discord
+  // user — see autoBlacklistForScrape below.
+  const keyFingerprint = (await sha256Hex(key)).slice(0, 24);
+  const keyRate = await rateCheck(env, "loader-key", keyFingerprint, 4, 60);
+  if (!keyRate.allowed) {
+    const banCtx = { env, request, key, deviceId, reason: "scrape_rate_abuse" };
+    if (ctx?.waitUntil) ctx.waitUntil(autoBlacklistForScrape(banCtx)); else await autoBlacklistForScrape(banCtx);
+    return blacklistedSource();
+  }
 
   // Fast path: hash the license key and HWID in parallel, then fetch the
   // license, blacklist state and requested script in one D1 query.

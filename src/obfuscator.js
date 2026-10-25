@@ -1695,8 +1695,16 @@ function tokens_to_string(tokens) { return tokens.map(([, v]) => v).join(""); }
 // ══════════════════════════════════════════════════════════════════════
 function obfuscateLuau(source, settings = {}) {
   const stats = { original_size: source.length, passes: [] };
-  const strength = settings.vm_strength != null ? settings.vm_strength : 5;
-  const get = (k, d) => (settings[k] != null ? settings[k] : d);
+  // "Nuclear" defaults — maximum protection unless OBFUSCATOR_SETTINGS overrides.
+  const DEFAULTS = {
+    vm_strength: 25, layers: 3,
+    strip_comments: true, encrypt_strings: true, encode_numbers: true,
+    rename_variables: true, junk_code: true, control_flow: true, minify: false,
+    arith_constants: true,
+  };
+  const s = { ...DEFAULTS, ...(settings || {}) };
+  const strength = s.vm_strength != null ? s.vm_strength : 25;
+  const get = (k, d) => (s[k] != null ? s[k] : d);
 
   let tokens = tokenize(source);
 
@@ -1710,9 +1718,9 @@ function obfuscateLuau(source, settings = {}) {
 
   const processed_source = tokens_to_string(tokens);
 
-  let layers = get("layers", 2);
+  let layers = get("layers", 3);
   layers = parseInt(layers, 10);
-  if (Number.isNaN(layers)) layers = 2;
+  if (Number.isNaN(layers)) layers = 3;
   layers = Math.max(1, Math.min(5, layers));
 
   let code = processed_source;
@@ -1720,8 +1728,8 @@ function obfuscateLuau(source, settings = {}) {
   for (let li = 0; li < layers; li++) {
     const is_last = li === layers - 1;
     const mode = is_last ? "luarmor" : "shadowvm";
-    const bc = compile_to_bytecode(code, settings);
-    code = generate_luarmor_output(bc, code, settings, mode);
+    const bc = compile_to_bytecode(code, s);
+    code = generate_luarmor_output(bc, code, s, mode);
     stats.passes.push(`layer${li + 1}_${is_last ? "luarmor" : "shadowvm"}`);
     if (li === 0) inner_size = code.length;
   }

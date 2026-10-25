@@ -979,7 +979,8 @@ function safeScriptRecord(guild, script) {
 //
 // Optional OBFUSCATOR_SETTINGS is a JSON object of obfuscation options
 // (vm_strength 1-25, layers 1-5, encrypt_strings, encode_numbers, ...); when
-// unset, sensible defaults are used (vm_strength 5, layers 2, all passes on).
+// unset, the "nuclear" defaults are used (vm_strength 25, layers 3, arithmetic
+// constants and all passes on). Override it to dial this down for large scripts.
 //
 // Fails closed: if obfuscation throws or yields empty output, the save is
 // rejected so unobfuscated source is never stored or served.

@@ -9,6 +9,8 @@ HWID_PEPPER=generate_another_long_random_secret
 CONFIG_SECRET=generate_a_long_random_secret_for_encrypted_config
 # The ShadowVM obfuscator runs inside the Worker (src/obfuscator.js) — no
 # external service needed. Every script uploaded/replaced in the dashboard is
-# obfuscated before being stored and served. This optional JSON overrides the
-# obfuscation options; omit it to use the defaults (vm_strength 5, layers 2).
-# OBFUSCATOR_SETTINGS={"vm_strength":10,"layers":2}
+# obfuscated before being stored and served. Defaults are "nuclear"
+# (vm_strength 25, layers 3, arithmetic constants on). This optional JSON
+# overrides them — set it to dial strength/layers DOWN for large scripts so you
+# stay within the Worker CPU limit, e.g.:
+# OBFUSCATOR_SETTINGS={"vm_strength":8,"layers":2}

@@ -7,3 +7,5 @@ ADMIN_PASSWORD=choose_a_long_random_admin_password
 LICENSE_KEY_SECRET=generate_another_long_random_secret
 HWID_PEPPER=generate_another_long_random_secret
 CONFIG_SECRET=generate_a_long_random_secret_for_encrypted_config
+# Note: scripts are obfuscated locally before upload (npm run obfuscate, or
+# app.py) and the dashboard stores uploads as-is — no obfuscator config needed.

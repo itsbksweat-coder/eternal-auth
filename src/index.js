@@ -3001,11 +3001,11 @@ async function handleAdminApi(request, env, url, ctx) {
     const rawContent = body?.content == null ? "" : String(body.content);
     if (!sourceFileName) return json({ ok: false, error: "A supported uploaded text/script file is required (.txt, .lua, .luau, etc.)." }, 400);
     if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
-    if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
     const name = cleanText(body?.name, 100) || sourceFileName.replace(/\.[^.]+$/, "") || "Uploaded Script";
     const version = cleanText(body?.version, 40) || "1.0.0";
     const enabled = body?.enabled === false ? 0 : 1;
     const ffaEnabled = body?.ffa_enabled === true ? 1 : 0;
+    // Stored as-is: obfuscate locally (app.py / src/obfuscator.js) before uploading.
     const content = rawContent;
     const timestamp = now();
 
@@ -3038,7 +3038,7 @@ async function handleAdminApi(request, env, url, ctx) {
       const rawContent = String(body.content);
       if (!sourceFileName) return json({ ok: false, error: "Replacing protected source requires an uploaded text/script file." }, 400);
       if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
-      if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
+      // Stored as-is: obfuscate locally (app.py / src/obfuscator.js) before uploading.
       content = rawContent;
     }
     await env.DB.prepare("UPDATE scripts SET name = ?, version = ?, enabled = ?, ffa_enabled = ?, content = ?, updated_at = ? WHERE id = ?")

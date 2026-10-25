@@ -7,6 +7,10 @@ This full project is based on your latest recovered v1.8.6 package. It has not b
 - Every script now has an independent **FFA** switch in the dashboard. When enabled, **Copy FFA** creates a keyless launcher and Discord `/ffa` returns it. `/ffa script:<name>` selects between multiple FFA scripts.
 - FFA launchers still require a device identifier and reject HWIDs already security-blacklisted in that project. Turning FFA off immediately makes both FFA layers return `Blacklisted`.
 
+- **Uploads are stored as-is — obfuscate locally, then upload.** The dashboard create/replace endpoints store (and every loader serves) exactly what you upload, with no size limit. Obfuscate the script on your own machine first, then upload the finished file. Two ways to obfuscate locally, both producing the same ShadowVM output with no Cloudflare CPU limit to worry about:
+  - `npm run obfuscate -- input.lua output.lua` (the JS port in `src/obfuscator.js`; defaults to maximum strength — `vm_strength 25`, `layers 3`. Override with `--settings '{"vm_strength":10,"layers":2}'`).
+  - Or run the Python `app.py` and use its web UI / `POST /api/obfuscate`.
+  Then upload `output.lua` through the dashboard. (The in-Worker obfuscator was removed from the upload path because Cloudflare's Free plan caps a Worker at 10 ms CPU, far below what obfuscation needs.)
 - Cloudflare Worker serves the dashboard, Discord interactions and authentication API.
 - The existing single SQLite Durable Object maintains Discord online presence; new DIRECT_MESSAGES handling replies to help, script, redeem, hwid and status. Other DMs get a brief command guide. These are deterministic replies, not an AI chat service. License-changing actions stay in the linked server.
 - Missing key or device ID is rejected before protected code is returned. Public loader URLs still return the small bootstrap required to start authentication; they never contain the protected script.
@@ -27,7 +31,7 @@ The upgrade script targets an existing v1.8.6 deployment. If live is older, insp
 
 ## Fresh deployment
 
-Create a free Worker and D1 database in your own Cloudflare account, update the database ID in `wrangler.jsonc`, initialize the fresh database with `schema.sql`, and configure Worker secrets: `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `LICENSE_KEY_SECRET`, `HWID_PEPPER`, `CONFIG_SECRET`, plus `ADMIN_PASSWORD` for first login. Use independent random cryptographic values for signing/encryption secrets. Keep them private. Follow the original README for command registration and linking your server. The ZIP contains no credentials.
+Create a free Worker and D1 database in your own Cloudflare account, update the database ID in `wrangler.jsonc`, initialize the fresh database with `schema.sql`, and configure Worker secrets: `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `LICENSE_KEY_SECRET`, `HWID_PEPPER`, `CONFIG_SECRET`, plus `ADMIN_PASSWORD` for first login. (No obfuscator secret is needed — scripts are obfuscated locally before upload.) Use independent random cryptographic values for signing/encryption secrets. Keep them private. Follow the original README for command registration and linking your server. The ZIP contains no credentials.
 
 ## Limits and recovery
 

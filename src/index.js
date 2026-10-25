@@ -2,7 +2,6 @@ import { authenticatedLauncher, ffaLauncher } from "../public/entry-loader.js";
 import { DurableObject } from "cloudflare:workers";
 import { DmResponder } from "./dm-responder.js";
 import { deviceBlocked, bindDevice, hwidCooldownSeconds } from "./device-security.js";
-import { obfuscateLuau } from "./obfuscator.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -973,40 +972,6 @@ function safeScriptRecord(guild, script) {
   };
 }
 
-// Run a freshly-uploaded script through the ShadowVM obfuscator before it is
-// stored. The obfuscator runs in-process (src/obfuscator.js) — no external
-// service — so every stored and served script is obfuscated Luau.
-//
-// Optional OBFUSCATOR_SETTINGS is a JSON object of obfuscation options
-// (vm_strength 1-25, layers 1-5, encrypt_strings, encode_numbers, ...); when
-// unset, the "nuclear" defaults are used (vm_strength 25, layers 3, arithmetic
-// constants and all passes on). Override it to dial this down for large scripts.
-//
-// Fails closed: if obfuscation throws or yields empty output, the save is
-// rejected so unobfuscated source is never stored or served.
-async function obfuscateScriptSource(env, source) {
-  let settings = {};
-  if (env.OBFUSCATOR_SETTINGS) {
-    try {
-      const parsed = JSON.parse(env.OBFUSCATOR_SETTINGS);
-      if (parsed && typeof parsed === "object") settings = parsed;
-    } catch {
-      throw new Error("OBFUSCATOR_SETTINGS is not valid JSON.");
-    }
-  }
-
-  let result;
-  try {
-    result = obfuscateLuau(source, settings);
-  } catch (err) {
-    throw new Error(`Obfuscation failed: ${err && err.message ? err.message : "unknown error"}`);
-  }
-  const code = result && typeof result.code === "string" ? result.code : "";
-  if (!code.trim()) {
-    throw new Error("Obfuscator produced empty output.");
-  }
-  return code;
-}
 
 async function getScriptsForGuild(env, guildId, enabledOnly = false) {
   const cacheKey = `${guildId}:${enabledOnly ? "enabled" : "all"}`;
@@ -3036,17 +3001,12 @@ async function handleAdminApi(request, env, url, ctx) {
     const rawContent = body?.content == null ? "" : String(body.content);
     if (!sourceFileName) return json({ ok: false, error: "A supported uploaded text/script file is required (.txt, .lua, .luau, etc.)." }, 400);
     if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
-    if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
     const name = cleanText(body?.name, 100) || sourceFileName.replace(/\.[^.]+$/, "") || "Uploaded Script";
     const version = cleanText(body?.version, 40) || "1.0.0";
     const enabled = body?.enabled === false ? 0 : 1;
     const ffaEnabled = body?.ffa_enabled === true ? 1 : 0;
-    let content;
-    try {
-      content = await obfuscateScriptSource(env, rawContent);
-    } catch (err) {
-      return json({ ok: false, error: err && err.message ? err.message : "Obfuscation failed." }, 502);
-    }
+    // Stored as-is: obfuscate locally (app.py / src/obfuscator.js) before uploading.
+    const content = rawContent;
     const timestamp = now();
 
     await env.DB.prepare(
@@ -3078,12 +3038,8 @@ async function handleAdminApi(request, env, url, ctx) {
       const rawContent = String(body.content);
       if (!sourceFileName) return json({ ok: false, error: "Replacing protected source requires an uploaded text/script file." }, 400);
       if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
-      if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
-      try {
-        content = await obfuscateScriptSource(env, rawContent);
-      } catch (err) {
-        return json({ ok: false, error: err && err.message ? err.message : "Obfuscation failed." }, 502);
-      }
+      // Stored as-is: obfuscate locally (app.py / src/obfuscator.js) before uploading.
+      content = rawContent;
     }
     await env.DB.prepare("UPDATE scripts SET name = ?, version = ?, enabled = ?, ffa_enabled = ?, content = ?, updated_at = ? WHERE id = ?")
       .bind(name, version, enabled, ffaEnabled, content, now(), scriptId)

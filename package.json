@@ -8,6 +8,7 @@
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute eternal-auth-db --remote --file=./schema.sql",
     "commands": "node ./scripts/register-commands.mjs",
+    "obfuscate": "node ./scripts/obfuscate.mjs",
     "deploy:first": "wrangler deploy --secrets-file .secrets",
     "db:migrate:v1.2": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.2-server-keys.sql",
     "gateway:tail": "wrangler tail eternal-auth",

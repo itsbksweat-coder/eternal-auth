@@ -972,6 +972,68 @@ function safeScriptRecord(guild, script) {
   };
 }
 
+// Run a freshly-uploaded script through the external ShadowVM obfuscator before
+// it is stored. The obfuscator is a separate Python/Flask service (app.py); the
+// Worker cannot run it in-process, so it POSTs the raw source to its
+// /api/obfuscate endpoint and stores the returned, obfuscated Luau.
+//
+// Configured by OBFUSCATOR_URL (origin of the running obfuscator, e.g.
+// "https://obf.example.com"). Optional OBFUSCATOR_SETTINGS is a JSON object of
+// obfuscation options (vm_strength, layers, encrypt_strings, ...); when unset
+// the obfuscator applies its own defaults.
+//
+// Fails closed: if OBFUSCATOR_URL is not set, or the service is unreachable or
+// returns an error, the save is rejected so unobfuscated source is never stored
+// or served.
+async function obfuscateScriptSource(env, source) {
+  const base = String(env.OBFUSCATOR_URL || "").trim().replace(/\/+$/, "");
+  if (!base) {
+    throw new Error("Obfuscator is not configured (set the OBFUSCATOR_URL secret).");
+  }
+
+  let settings = {};
+  if (env.OBFUSCATOR_SETTINGS) {
+    try {
+      const parsed = JSON.parse(env.OBFUSCATOR_SETTINGS);
+      if (parsed && typeof parsed === "object") settings = parsed;
+    } catch {
+      throw new Error("OBFUSCATOR_SETTINGS is not valid JSON.");
+    }
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+  let response;
+  try {
+    response = await fetch(`${base}/api/obfuscate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source, settings }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`Obfuscator request failed: ${err && err.message ? err.message : "unreachable"}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const detail = payload && payload.error ? payload.error : `HTTP ${response.status}`;
+    throw new Error(`Obfuscator error: ${detail}`);
+  }
+  const code = payload && typeof payload.code === "string" ? payload.code : "";
+  if (!code.trim()) {
+    throw new Error("Obfuscator returned empty output.");
+  }
+  return code;
+}
 
 async function getScriptsForGuild(env, guildId, enabledOnly = false) {
   const cacheKey = `${guildId}:${enabledOnly ? "enabled" : "all"}`;
@@ -3006,7 +3068,12 @@ async function handleAdminApi(request, env, url, ctx) {
     const version = cleanText(body?.version, 40) || "1.0.0";
     const enabled = body?.enabled === false ? 0 : 1;
     const ffaEnabled = body?.ffa_enabled === true ? 1 : 0;
-    const content = rawContent;
+    let content;
+    try {
+      content = await obfuscateScriptSource(env, rawContent);
+    } catch (err) {
+      return json({ ok: false, error: err && err.message ? err.message : "Obfuscation failed." }, 502);
+    }
     const timestamp = now();
 
     await env.DB.prepare(
@@ -3039,7 +3106,11 @@ async function handleAdminApi(request, env, url, ctx) {
       if (!sourceFileName) return json({ ok: false, error: "Replacing protected source requires an uploaded text/script file." }, 400);
       if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
       if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
-      content = rawContent;
+      try {
+        content = await obfuscateScriptSource(env, rawContent);
+      } catch (err) {
+        return json({ ok: false, error: err && err.message ? err.message : "Obfuscation failed." }, 502);
+      }
     }
     await env.DB.prepare("UPDATE scripts SET name = ?, version = ?, enabled = ?, ffa_enabled = ?, content = ?, updated_at = ? WHERE id = ?")
       .bind(name, version, enabled, ffaEnabled, content, now(), scriptId)

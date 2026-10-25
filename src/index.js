@@ -2,6 +2,7 @@ import { authenticatedLauncher, ffaLauncher } from "../public/entry-loader.js";
 import { DurableObject } from "cloudflare:workers";
 import { DmResponder } from "./dm-responder.js";
 import { deviceBlocked, bindDevice, hwidCooldownSeconds } from "./device-security.js";
+import { obfuscateLuau } from "./obfuscator.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -972,25 +973,17 @@ function safeScriptRecord(guild, script) {
   };
 }
 
-// Run a freshly-uploaded script through the external ShadowVM obfuscator before
-// it is stored. The obfuscator is a separate Python/Flask service (app.py); the
-// Worker cannot run it in-process, so it POSTs the raw source to its
-// /api/obfuscate endpoint and stores the returned, obfuscated Luau.
+// Run a freshly-uploaded script through the ShadowVM obfuscator before it is
+// stored. The obfuscator runs in-process (src/obfuscator.js) — no external
+// service — so every stored and served script is obfuscated Luau.
 //
-// Configured by OBFUSCATOR_URL (origin of the running obfuscator, e.g.
-// "https://obf.example.com"). Optional OBFUSCATOR_SETTINGS is a JSON object of
-// obfuscation options (vm_strength, layers, encrypt_strings, ...); when unset
-// the obfuscator applies its own defaults.
+// Optional OBFUSCATOR_SETTINGS is a JSON object of obfuscation options
+// (vm_strength 1-25, layers 1-5, encrypt_strings, encode_numbers, ...); when
+// unset, sensible defaults are used (vm_strength 5, layers 2, all passes on).
 //
-// Fails closed: if OBFUSCATOR_URL is not set, or the service is unreachable or
-// returns an error, the save is rejected so unobfuscated source is never stored
-// or served.
+// Fails closed: if obfuscation throws or yields empty output, the save is
+// rejected so unobfuscated source is never stored or served.
 async function obfuscateScriptSource(env, source) {
-  const base = String(env.OBFUSCATOR_URL || "").trim().replace(/\/+$/, "");
-  if (!base) {
-    throw new Error("Obfuscator is not configured (set the OBFUSCATOR_URL secret).");
-  }
-
   let settings = {};
   if (env.OBFUSCATOR_SETTINGS) {
     try {
@@ -1001,36 +994,15 @@ async function obfuscateScriptSource(env, source) {
     }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120000);
-  let response;
+  let result;
   try {
-    response = await fetch(`${base}/api/obfuscate`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ source, settings }),
-      signal: controller.signal,
-    });
+    result = obfuscateLuau(source, settings);
   } catch (err) {
-    throw new Error(`Obfuscator request failed: ${err && err.message ? err.message : "unreachable"}`);
-  } finally {
-    clearTimeout(timeout);
+    throw new Error(`Obfuscation failed: ${err && err.message ? err.message : "unknown error"}`);
   }
-
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    const detail = payload && payload.error ? payload.error : `HTTP ${response.status}`;
-    throw new Error(`Obfuscator error: ${detail}`);
-  }
-  const code = payload && typeof payload.code === "string" ? payload.code : "";
+  const code = result && typeof result.code === "string" ? result.code : "";
   if (!code.trim()) {
-    throw new Error("Obfuscator returned empty output.");
+    throw new Error("Obfuscator produced empty output.");
   }
   return code;
 }

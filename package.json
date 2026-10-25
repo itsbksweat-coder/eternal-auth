@@ -15,7 +15,7 @@
     "db:migrate:v1.7": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.7-backend-persistence.sql",
     "db:migrate:v1.8": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8-multi-panels.sql",
     "db:migrate:v1.8.6": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.4-panel-customization.sql",
-    "check": "node --check src/index.js && node --check src/dm-responder.js && node --check src/device-security.js && node --check public/app.js && node --test tests/*.test.mjs",
+    "check": "node --check src/index.js && node --check src/obfuscator.js && node --check src/dm-responder.js && node --check src/device-security.js && node --check public/app.js && node --test tests/*.test.mjs",
     "db:migrate:v1.8.7": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.7-device-security.sql",
     "db:migrate:v1.8.8": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.8-ffa.sql",
     "db:migrate:v1.8.9": "wrangler d1 execute eternal-auth-db --remote --file=./migrations/v1.8.9-panel-scoped-licenses.sql",

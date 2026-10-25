@@ -7,9 +7,8 @@ ADMIN_PASSWORD=choose_a_long_random_admin_password
 LICENSE_KEY_SECRET=generate_another_long_random_secret
 HWID_PEPPER=generate_another_long_random_secret
 CONFIG_SECRET=generate_a_long_random_secret_for_encrypted_config
-# Origin of the running ShadowVM obfuscator (app.py). Every script uploaded or
-# replaced through the dashboard is POSTed to OBFUSCATOR_URL/api/obfuscate and
-# the obfuscated result is what gets stored and served. Required for uploads.
-OBFUSCATOR_URL=https://your-obfuscator-host.example.com
-# Optional JSON of obfuscation options; omit to use the obfuscator's defaults.
+# The ShadowVM obfuscator runs inside the Worker (src/obfuscator.js) — no
+# external service needed. Every script uploaded/replaced in the dashboard is
+# obfuscated before being stored and served. This optional JSON overrides the
+# obfuscation options; omit it to use the defaults (vm_strength 5, layers 2).
 # OBFUSCATOR_SETTINGS={"vm_strength":10,"layers":2}

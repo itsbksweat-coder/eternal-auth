@@ -220,7 +220,7 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/local __ea_stage_reverse=/);
   assert.match(lua,/string\.reverse\(__ea_stage_reverse\)/);
   assert.match(lua,/X-Eternal-Execute/);
-  assert.match(lua,/__ea_native_ls\(__ea_body\)/);
+  assert.match(lua,/pcall\(__ea_native_ls,__ea_body\)/);
   assert.match(lua,/body=nil/);
   assert.match(lua,/loadstring_hook/);
   assert.match(lua,/iscclosure/);
@@ -253,7 +253,7 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.doesNotMatch(bootstrap,/http_spy|__ea_has_url_scheme/);
   assert.match(bootstrap,/X-Eternal-Ticket/);
   assert.match(bootstrap,/X-Eternal-Execute/);
-  assert.match(bootstrap,/__ea_native_ls\(__ea_body\)/);
+  assert.match(bootstrap,/pcall\(__ea_native_ls,__ea_body\)/);
   assert.match(bootstrap,/loadstring_hook/);
   assert.doesNotMatch(bootstrap,/__ea_block|hookmetamethod/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);

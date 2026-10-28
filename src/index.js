@@ -2534,11 +2534,26 @@ do
     end
 end
 
-local fn,compileErr=__ea_native_ls(__ea_body)
+-- Compile defensively. Roblox throws "loadstring() is not available in
+-- RobloxScript context." when the loader is run from a vanilla LocalScript
+-- instead of an executor; we catch that here and kick with a readable
+-- message rather than letting Roblox dump a raw stack trace.
+local __ea_compile_ok,fn,compileErr=pcall(__ea_native_ls,__ea_body)
 __ea_body=nil
 
+if not __ea_compile_ok then
+    local msg=tostring(fn or "")
+    if string.find(msg,"RobloxScript",1,true) then
+        K("Voltra Auth: this loader must be run from an executor (loadstring is disabled here).")
+    else
+        K("Voltra Auth loader compile error: "..msg:sub(1,180))
+    end
+    return
+end
+
 if type(fn)~="function" then
-    error("Voltra Auth loader compile error.",0)
+    K("Voltra Auth loader compile error: "..tostring(compileErr or "no function returned"):sub(1,180))
+    return
 end
 
 -- Watchdog: re-check every 0.5s after we hand off. If someone hooks a
@@ -2551,7 +2566,12 @@ task.spawn(function()
     end
 end)
 
-fn()`;
+-- Run the compiled payload. pcall so a runtime error in the user's own
+-- script doesn't leak a stack trace that references internal names.
+local __ea_run_ok,__ea_run_err=pcall(fn)
+if not __ea_run_ok then
+    K("Voltra Auth: runtime error — "..tostring(__ea_run_err or ""):sub(1,180))
+end`;
 }
 
 async function tryD1(label, operation) {

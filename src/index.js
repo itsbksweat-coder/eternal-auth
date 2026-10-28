@@ -2369,11 +2369,10 @@ if not d or tostring(d)=="" then K("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if type(req)~="function" then K("Voltra Auth requires an HTTP request function.") return end
 
--- HTTP spy detection: scan for the Worker domain in any TextLabel /
--- TextButton / TextBox under PlayerGui, CoreGui, or the executor's hidden
--- UI parent (gethui). An HTTP spy always renders captured URLs on a GUI
--- element; a legit executor never paints our domain. Much lower false
--- positive rate than fingerprinting function hooks.
+-- HTTP spy detection: scan ONLY PlayerGui for the Worker domain in text
+-- elements. CoreGui/gethui host executor-provided panels that may log
+-- fetched URLs — scanning those false-positives on legit users. PlayerGui
+-- is user space; an HTTP spy that paints to PlayerGui is unambiguous.
 local __at_voltra_domain="voltra-auth.xyzcheatz.workers.dev"
 local function __at_gui_mentions_voltra()
     local scopes={}
@@ -2384,8 +2383,6 @@ local function __at_gui_mentions_voltra()
             if pg then scopes[#scopes+1]=pg end
         end
     end)
-    __at_pcall(function() scopes[#scopes+1]=game:GetService("CoreGui") end)
-    __at_pcall(function() if type(gethui)=="function" then scopes[#scopes+1]=gethui() end end)
     for _,root in ipairs(scopes) do
         local ok,descendants=__at_pcall(function() return root:GetDescendants() end)
         if ok and type(descendants)=="table" then
@@ -2408,57 +2405,8 @@ local function __at_gui_mentions_voltra()
     end
     return nil
 end
--- Also hook rconsoleprint / rconsolewarn / print / warn to detect console
--- output containing the domain. We wrap these ourselves — the baseline is
--- unhooked at this instant, so our wrapper replaces them cleanly.
-local __at_console_breach=nil
-local function __at_set_console_breach(fnName,args)
-    for i=1,select("#",table.unpack(args)) do
-        local v=args[i]
-        if type(v)=="string" and string.find(v,__at_voltra_domain,1,true) then
-            __at_console_breach=fnName.." printed the auth domain"
-            return
-        end
-    end
-end
-__at_pcall(function()
-    local origPrint=print
-    print=function(...)
-        if not __at_console_breach then __at_set_console_breach("print",{...}) end
-        return origPrint(...)
-    end
-end)
-__at_pcall(function()
-    local origWarn=warn
-    warn=function(...)
-        if not __at_console_breach then __at_set_console_breach("warn",{...}) end
-        return origWarn(...)
-    end
-end)
-__at_pcall(function()
-    if type(rconsoleprint)=="function" then
-        local orig=rconsoleprint
-        rconsoleprint=function(...)
-            if not __at_console_breach then __at_set_console_breach("rconsoleprint",{...}) end
-            return orig(...)
-        end
-    end
-end)
-__at_pcall(function()
-    if type(rconsolewarn)=="function" then
-        local orig=rconsolewarn
-        rconsolewarn=function(...)
-            if not __at_console_breach then __at_set_console_breach("rconsolewarn",{...}) end
-            return orig(...)
-        end
-    end
-end)
-local function __at_http_startup_breach()
-    return __at_gui_mentions_voltra()
-end
-local function __at_http_breach()
-    return __at_console_breach or __at_gui_mentions_voltra()
-end
+local function __at_http_startup_breach() return __at_gui_mentions_voltra() end
+local function __at_http_breach() return __at_gui_mentions_voltra() end
 
 -- Deferred startup check: now that we have key + HWID, if any native
 -- primitive was already hooked at startup OR any HTTP primitive is
@@ -2776,16 +2724,14 @@ end)
 -- the attacker are intercepted too.
 do
     local __ea_disable_names={
-        -- clipboard
+        -- clipboard only. writefile/appendfile left alone — your own script
+        -- (settings persistence, HWID file, etc.) uses them legitimately.
         "setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
         "setrbxclipboard","copyclipboard","clipboardset","setclip",
-        -- filesystem writers
-        "writefile","appendfile","writefileasync","makefolder","createfile","delfile","delfolder",
     }
     local __ea_disable_child_names={
         "set","write","copy","setclipboard","toclipboard","writeclipboard",
         "set_clipboard","write_clipboard","setclip",
-        "writefile","appendfile","makefolder","createfile","delfile","delfolder",
     }
     -- Trap: calling any disabled primitive instantly reports exfil_attempt
     -- to the server (persistent HWID blacklist) and goes to lockdown. We

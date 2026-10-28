@@ -2487,10 +2487,20 @@ local function __ea_has_hook_upvalues(fn)
     return hooked
 end
 
+-- Canary: pick the first candidate that actually compiles. This beats
+-- the previous native-only pick which rejected executors whose working
+-- loadstring is a Lua wrapper (and fell through to Roblox's native
+-- loadstring, which throws "RobloxScript context"). Hooked-but-working
+-- implementations still get caught by the __at_ anti-tamper watchdog
+-- and the per-license watermark.
 for _,fn in ipairs(__ea_ls_candidates) do
-    if __ea_is_native(fn) and not __ea_has_hook_upvalues(fn) then
-        __ea_native_ls=fn
-        break
+    local okCompile,compiled=pcall(fn,"return 42")
+    if okCompile and type(compiled)=="function" then
+        local okRun,val=pcall(compiled)
+        if okRun and val==42 then
+            __ea_native_ls=fn
+            break
+        end
     end
 end
 

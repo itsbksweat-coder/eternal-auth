@@ -4280,10 +4280,20 @@ function optionMap(interaction) {
   return Object.fromEntries((interaction.data?.options || []).map((o) => [o.name, o.value]));
 }
 
-// Any Discord member in your server with this role gets full command
-// access — same as if they had Administrator or the project's manager
-// role, in every project the bot is in. Treat as a bot-wide staff role.
+// Hardcoded Voltra owner / staff grants. Anyone matching one of these
+// gets full command access across every guild the bot is in, regardless
+// of their Discord-level Administrator permission or the project's own
+// manager role.
+const VOLTRA_OWNER_IDS = new Set([
+  "1329820705335808132",
+  "1167590082878902435",
+]);
 const VOLTRA_STAFF_ROLE_ID = "1559257141586567271";
+
+function memberIsVoltraOwner(interaction) {
+  const uid = interaction.member?.user?.id || interaction.user?.id;
+  return !!uid && VOLTRA_OWNER_IDS.has(String(uid));
+}
 
 function memberHasStaffRole(interaction) {
   const roles = interaction.member?.roles || [];
@@ -4291,6 +4301,7 @@ function memberHasStaffRole(interaction) {
 }
 
 function memberIsAdmin(interaction) {
+  if (memberIsVoltraOwner(interaction)) return true;
   if (memberHasStaffRole(interaction)) return true;
   try {
     return (BigInt(interaction.member?.permissions || "0") & ADMINISTRATOR) === ADMINISTRATOR;

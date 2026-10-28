@@ -2368,50 +2368,95 @@ if not d or tostring(d)=="" then K("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if type(req)~="function" then K("Voltra Auth requires an HTTP request function.") return end
 
--- Snapshot HTTP primitives for http_spy detection.
--- Roblox-native methods (game.HttpGet etc. + HttpService.RequestAsync) must
--- never have upvalues in a clean environment. If they do, something wrapped
--- them (hookfunction, etc.) and we fire http_spy immediately.
--- Executor-provided fns (request/http_request/syn.request) are allowed to
--- have upvalues at startup since many executors ship them as Lua wrappers;
--- we only flag them if the reference or upvalue count changes later.
-local __at_http_originals={}
-local function __at_snap_http(name,getter,nativeExpected)
-    local ok,fn=__at_pcall(getter)
-    if ok and type(fn)=="function" then
-        __at_http_originals[name]={fn=fn,ups=__at_has_upvalues(fn),getter=getter,nativeExpected=nativeExpected}
+-- HTTP spy detection: scan for the Worker domain in any TextLabel /
+-- TextButton / TextBox under PlayerGui, CoreGui, or the executor's hidden
+-- UI parent (gethui). An HTTP spy always renders captured URLs on a GUI
+-- element; a legit executor never paints our domain. Much lower false
+-- positive rate than fingerprinting function hooks.
+local __at_voltra_domain="voltra-auth.xyzcheatz.workers.dev"
+local function __at_gui_mentions_voltra()
+    local scopes={}
+    __at_pcall(function()
+        local plr=P.LocalPlayer
+        if plr then
+            local pg=plr:FindFirstChildOfClass("PlayerGui")
+            if pg then scopes[#scopes+1]=pg end
+        end
+    end)
+    __at_pcall(function() scopes[#scopes+1]=game:GetService("CoreGui") end)
+    __at_pcall(function() if type(gethui)=="function" then scopes[#scopes+1]=gethui() end end)
+    for _,root in ipairs(scopes) do
+        local ok,descendants=__at_pcall(function() return root:GetDescendants() end)
+        if ok and type(descendants)=="table" then
+            for _,obj in ipairs(descendants) do
+                local okT,txt=__at_pcall(function()
+                    if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+                        return obj.Text
+                    end
+                    return nil
+                end)
+                if okT and type(txt)=="string" and string.find(txt,__at_voltra_domain,1,true) then
+                    local className="unknown"
+                    __at_pcall(function() className=obj.ClassName end)
+                    local name="unknown"
+                    __at_pcall(function() name=obj.Name end)
+                    return className.."/"..name.." contained the auth domain"
+                end
+            end
+        end
+    end
+    return nil
+end
+-- Also hook rconsoleprint / rconsolewarn / print / warn to detect console
+-- output containing the domain. We wrap these ourselves — the baseline is
+-- unhooked at this instant, so our wrapper replaces them cleanly.
+local __at_console_breach=nil
+local function __at_set_console_breach(fnName,args)
+    for i=1,select("#",table.unpack(args)) do
+        local v=args[i]
+        if type(v)=="string" and string.find(v,__at_voltra_domain,1,true) then
+            __at_console_breach=fnName.." printed the auth domain"
+            return
+        end
     end
 end
-__at_snap_http("request",function() return request end,false)
-__at_snap_http("http_request",function() return http_request end,false)
-__at_snap_http("syn.request",function() return syn and syn.request end,false)
-__at_snap_http("http.request",function() return http and http.request end,false)
-__at_snap_http("game.HttpGet",function() return game.HttpGet end,true)
-__at_snap_http("game.HttpGetAsync",function() return game.HttpGetAsync end,true)
-__at_snap_http("game.HttpPost",function() return game.HttpPost end,true)
-__at_snap_http("game.HttpPostAsync",function() return game.HttpPostAsync end,true)
-__at_snap_http("HttpService.RequestAsync",function() return H.RequestAsync end,true)
--- Startup HTTP check: any native HTTP method with upvalues at startup is
--- already wrapped (hookfunction, metamethod proxy, etc.) and we fire.
+__at_pcall(function()
+    local origPrint=print
+    print=function(...)
+        if not __at_console_breach then __at_set_console_breach("print",{...}) end
+        return origPrint(...)
+    end
+end)
+__at_pcall(function()
+    local origWarn=warn
+    warn=function(...)
+        if not __at_console_breach then __at_set_console_breach("warn",{...}) end
+        return origWarn(...)
+    end
+end)
+__at_pcall(function()
+    if type(rconsoleprint)=="function" then
+        local orig=rconsoleprint
+        rconsoleprint=function(...)
+            if not __at_console_breach then __at_set_console_breach("rconsoleprint",{...}) end
+            return orig(...)
+        end
+    end
+end)
+__at_pcall(function()
+    if type(rconsolewarn)=="function" then
+        local orig=rconsolewarn
+        rconsolewarn=function(...)
+            if not __at_console_breach then __at_set_console_breach("rconsolewarn",{...}) end
+            return orig(...)
+        end
+    end
+end)
 local function __at_http_startup_breach()
-    for name,snap in pairs(__at_http_originals) do
-        if snap.nativeExpected and snap.ups==true then
-            return name.." wrapped at startup (hookfunction detected)"
-        end
-    end
-    return nil
+    return __at_gui_mentions_voltra()
 end
--- Runtime HTTP check: any reference change or new upvalue growth.
 local function __at_http_breach()
-    for name,snap in pairs(__at_http_originals) do
-        local ok,current=__at_pcall(snap.getter)
-        if ok and current~=snap.fn then return name.." reference changed" end
-        if ok then
-            local u=__at_has_upvalues(current)
-            if snap.ups==false and u==true then return name.." gained upvalues" end
-        end
-    end
-    return nil
+    return __at_console_breach or __at_gui_mentions_voltra()
 end
 
 -- Deferred startup check: now that we have key + HWID, if any native

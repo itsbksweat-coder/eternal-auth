@@ -1381,32 +1381,58 @@ async function handleSecurityReport(request, env) {
   const key = cleanText(body?.key, 256);
   const deviceId = cleanText(body?.device_id, 512);
   const reason = cleanText(body?.reason, 32);
-  if (!key || !deviceId) return publicJson({ ok: false, error: "Missing key or HWID" }, 400);
+  if (!deviceId) return publicJson({ ok: false, error: "Missing HWID" }, 400);
   if (!PERSISTENT_SECURITY_REASONS.has(reason) && !NON_PERSISTENT_SECURITY_REASONS.has(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
-  const license = await findLicenseByKey(env, key);
-  const hash = await hashDevice(env, deviceId);
-  if (!license || !license.hwid_hash || license.hwid_hash !== hash) return publicJson({ ok: false, error: "Invalid key or HWID" }, 403);
 
-  // Every persistent reason now blacklists the HWID + marks the license
-  // security_blacklisted. The reason string is stored as-is so the
-  // dashboard can show WHY the device was banned (tampering vs clipboard_source
-  // vs http_spy vs loadstring_hook, etc.).
-  if (PERSISTENT_SECURITY_REASONS.has(reason)) {
-    const timestamp = now();
-    const storedReason = reason === "clipboard_source" ? "clipboard_source_confirmed" : reason;
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)"
-      ).bind(license.guild_id, hash, storedReason, license.id, timestamp),
-      env.DB.prepare(
-        "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)"
-      ).bind(timestamp, license.guild_id, hash, license.id),
-    ]);
-    license.status = "security_blacklisted";
-    return publicJson({ ok: true, status: "Blacklisted", persistent: true, reason: storedReason });
+  if (!key) return publicJson({ ok: false, error: "Missing key" }, 400);
+  const hash = await hashDevice(env, deviceId);
+  const license = await findLicenseByKey(env, key);
+  if (!license) return publicJson({ ok: false, error: "Invalid key" }, 403);
+  // HWID gate: either the license has already bound to this device, OR it
+  // hasn't bound anything yet (first-run attacker whose bootstrap tripped
+  // the anti-tamper BEFORE /api/v1/loader got to bind). Anything else is a
+  // mismatched report and gets rejected to prevent key-holder griefing.
+  if (license.hwid_hash && license.hwid_hash !== hash) {
+    return publicJson({ ok: false, error: "Invalid key or HWID" }, 403);
   }
 
-  return publicJson({ ok: true, status: "Observed", persistent: false });
+  if (!PERSISTENT_SECURITY_REASONS.has(reason)) {
+    return publicJson({ ok: true, status: "Observed", persistent: false });
+  }
+
+  const timestamp = now();
+  const storedReason = reason === "clipboard_source" ? "clipboard_source_confirmed" : reason;
+
+  // Also ban them on every other project this device has bound to — one
+  // breach, lifetime ban across every script you own that this HWID touched.
+  const scopes = new Set([license.guild_id]);
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT DISTINCT guild_id FROM licenses WHERE hwid_hash = ? LIMIT 50"
+    ).bind(hash).all();
+    for (const row of rows?.results || []) {
+      if (row.guild_id) scopes.add(row.guild_id);
+    }
+  } catch {}
+
+  const statements = [];
+  // Bind the HWID to the license first (if not already) so later lookups work.
+  if (!license.hwid_hash) {
+    statements.push(env.DB.prepare(
+      "UPDATE licenses SET hwid_hash = ?, updated_at = ? WHERE id = ? AND hwid_hash IS NULL"
+    ).bind(hash, timestamp, license.id));
+  }
+  for (const guildId of scopes) {
+    statements.push(env.DB.prepare(
+      "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).bind(guildId, hash, storedReason, license.id, timestamp));
+    statements.push(env.DB.prepare(
+      "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)"
+    ).bind(timestamp, guildId, hash, license.id));
+  }
+  await env.DB.batch(statements);
+  license.status = "security_blacklisted";
+  return publicJson({ ok: true, status: "Blacklisted", persistent: true, reason: storedReason, scopes: scopes.size });
 }
 
 async function handleFfaSecurityReport(request, env) {
@@ -1414,10 +1440,44 @@ async function handleFfaSecurityReport(request, env) {
   const deviceId = cleanText(body?.device_id, 512);
   const reason = cleanText(body?.reason, 32);
   const token = cleanText(body?.token, 2048);
-  if (!deviceId || !token) return publicJson({ ok: false, error: "Missing report proof or HWID" }, 400);
+  if (!deviceId) return publicJson({ ok: false, error: "Missing HWID" }, 400);
   if (!PERSISTENT_SECURITY_REASONS.has(reason) && !NON_PERSISTENT_SECURITY_REASONS.has(reason)) return publicJson({ ok: false, error: "Invalid report" }, 400);
 
   const hash = await hashDevice(env, deviceId);
+  const timestamp = now();
+  const storedReason = reason === "clipboard_source" ? "clipboard_source_confirmed" : reason;
+
+  // Tokenless path: when the breach was detected BEFORE the FFA bootstrap
+  // could complete and get a signed token (e.g. an http_spy or tampering
+  // breach caught at startup). Blacklist the HWID across every FFA-enabled
+  // project — the attacker never got to run the script here so there's no
+  // legitimate reason this device is dumping.
+  if (!token) {
+    if (!PERSISTENT_SECURITY_REASONS.has(reason)) {
+      return publicJson({ ok: true, status: "Observed", persistent: false });
+    }
+    try {
+      const scopes = await env.DB.prepare(
+        "SELECT DISTINCT guild_id FROM scripts WHERE ffa_enabled = 1 AND enabled = 1 LIMIT 100"
+      ).all();
+      const statements = [];
+      for (const row of scopes?.results || []) {
+        if (!row.guild_id) continue;
+        statements.push(env.DB.prepare(
+          "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)"
+        ).bind(row.guild_id, hash, storedReason, "ffa:tokenless", timestamp));
+        statements.push(env.DB.prepare(
+          "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND hwid_hash = ?"
+        ).bind(timestamp, row.guild_id, hash));
+      }
+      if (statements.length) await env.DB.batch(statements);
+      return publicJson({ ok: true, status: "Blacklisted", persistent: true, reason: storedReason, scopes: (scopes?.results || []).length });
+    } catch (error) {
+      console.error("FFA tokenless blacklist failed", error);
+      return publicJson({ ok: false, error: "Report failed" }, 500);
+    }
+  }
+
   const claims = await verifyFfaReportToken(env, token, hash);
   if (!claims) return publicJson({ ok: false, error: "Invalid report proof" }, 403);
   const script = await env.DB.prepare("SELECT id, guild_id, enabled, ffa_enabled FROM scripts WHERE id = ? AND guild_id = ? LIMIT 1")
@@ -1426,8 +1486,6 @@ async function handleFfaSecurityReport(request, env) {
   if (!script || !script.enabled || !script.ffa_enabled) return publicJson({ ok: false, error: "FFA access is disabled" }, 403);
 
   if (PERSISTENT_SECURITY_REASONS.has(reason)) {
-    const timestamp = now();
-    const storedReason = reason === "clipboard_source" ? "clipboard_source_confirmed" : reason;
     await env.DB.batch([
       env.DB.prepare(
         "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)"

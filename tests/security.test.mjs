@@ -231,7 +231,10 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/copyclipboard/);
   assert.match(lua,/clipboardset/);
   assert.match(lua,/setrbxclipboard/);
-  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|hookmetamethod/);
+  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|hookmetamethod/);
+  // Anti-tamper lockdown uses TextLabel; just make sure it's wired to the right reason.
+  assert.match(lua,/reason="tampering"/);
+  assert.match(lua,/stop tryna crack my source/);
   assert.doesNotMatch(lua,/\$\{/);
 });
 

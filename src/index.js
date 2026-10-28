@@ -21,6 +21,7 @@ const PERSISTENT_SECURITY_REASONS = new Set([
   "clipboard_source",
   "loadstring_hook",
   "scrape_rate_abuse",
+  "tampering",
 ]);
 
 const NON_PERSISTENT_SECURITY_REASONS = new Set([
@@ -2106,6 +2107,170 @@ end`;
     : `local headers={Authorization="Bearer "..tostring(key),["X-Eternal-Device"]=tostring(d),["X-Eternal-Legacy-Device"]=legacyDevice and tostring(legacyDevice) or "",["X-Eternal-Ticket"]=${JSON.stringify(loaderTicket)},["X-Eternal-Stage-Proof"]=__ea_stage_proof,["X-Eternal-Execute"]="1"}`;
 
   return `-- Voltra Auth protected bootstrap
+-- Anti-tamper: snapshot native fns at the very top. If any critical
+-- primitive is already hooked at startup, or gets hooked while we run,
+-- show the lockdown GUI, freeze the character, report to the server
+-- (persistent "tampering" blacklist reason) and never load the source.
+local __at_pcall=pcall
+local __at_specs={
+    {name="loadstring",get=function() return loadstring end,native=true},
+    {name="load",get=function() return load end,native=true},
+    {name="string.char",get=function() return string.char end,native=true},
+    {name="string.gsub",get=function() return string.gsub end,native=true},
+    {name="string.sub",get=function() return string.sub end,native=true},
+    {name="string.match",get=function() return string.match end,native=true},
+    {name="string.byte",get=function() return string.byte end,native=true},
+    {name="table.concat",get=function() return table.concat end,native=true},
+    {name="bit32.bxor",get=function() return bit32 and bit32.bxor end,native=true},
+}
+local function __at_is_native(fn)
+    if type(fn)~="function" then return nil end
+    if debug and type(debug.info)=="function" then
+        local ok,src=__at_pcall(debug.info,fn,"s")
+        if ok and type(src)=="string" then return src=="[C]" or src=="=[C]" end
+    end
+    if debug and type(debug.getinfo)=="function" then
+        local ok,info=__at_pcall(debug.getinfo,fn,"S")
+        if ok and type(info)=="table" then return info.what=="C" end
+    end
+    if type(iscclosure)=="function" then
+        local ok,r=__at_pcall(iscclosure,fn)
+        if ok then return r==true end
+    end
+    return nil
+end
+local function __at_has_upvalues(fn)
+    if debug and type(debug.getupvalue)=="function" then
+        local ok,name=__at_pcall(debug.getupvalue,fn,1)
+        if ok then return name~=nil end
+    end
+    if type(getupvalues)=="function" then
+        local ok,ups=__at_pcall(getupvalues,fn)
+        if ok and type(ups)=="table" then return next(ups)~=nil end
+    end
+    return nil
+end
+local __at_originals={}
+for _,spec in ipairs(__at_specs) do
+    local ok,fn=__at_pcall(spec.get)
+    if ok and type(fn)=="function" then
+        __at_originals[spec.name]={fn=fn,native=__at_is_native(fn),ups=__at_has_upvalues(fn),spec=spec}
+    end
+end
+local function __at_startup_breach()
+    for name,snap in pairs(__at_originals) do
+        if snap.spec.native==true then
+            if snap.native==false then return name.." not native at startup" end
+            if snap.ups==true then return name.." wrapped at startup" end
+        end
+    end
+    return nil
+end
+local function __at_runtime_breach()
+    for name,snap in pairs(__at_originals) do
+        local ok,current=__at_pcall(snap.spec.get)
+        if ok and current~=snap.fn then return name.." reference changed" end
+        if ok and snap.spec.native==true then
+            local n=__at_is_native(current)
+            if n==false then return name.." became Lua" end
+            local u=__at_has_upvalues(current)
+            if snap.ups==false and u==true then return name.." gained upvalues" end
+        end
+    end
+    return nil
+end
+local function __at_report(breach,keyForReport,deviceForReport)
+    __at_pcall(function()
+        local r=request or http_request or (syn and syn.request) or (http and http.request)
+        if type(r)~="function" then return end
+        r({
+            Url=${JSON.stringify(securityReportUrl)},
+            Method="POST",
+            Headers={["content-type"]="application/json"},
+            Body=game:GetService("HttpService"):JSONEncode(${ffa
+              ? `{device_id=tostring(deviceForReport or "unknown"),reason="tampering",detail=tostring(breach or ""),token=__ea_report_token}`
+              : `{key=tostring(keyForReport or ""),device_id=tostring(deviceForReport or "unknown"),reason="tampering",detail=tostring(breach or "")}`})
+        })
+    end)
+end
+local __at_locked=false
+local function __at_lockdown(breach,keyForReport,deviceForReport)
+    if __at_locked then return end
+    __at_locked=true
+    __at_report(breach,keyForReport,deviceForReport)
+    __at_pcall(function()
+        local Players=game:GetService("Players")
+        local plr=Players.LocalPlayer
+        local parent
+        __at_pcall(function() if type(gethui)=="function" then parent=gethui() end end)
+        if not parent and plr then
+            __at_pcall(function() parent=plr:FindFirstChildOfClass("PlayerGui") or plr:WaitForChild("PlayerGui",1) end)
+        end
+        if not parent then parent=game:GetService("CoreGui") end
+        local gui=Instance.new("ScreenGui")
+        gui.Name="VoltraLockdown_"..tostring(math.random(1,99999999))
+        gui.IgnoreGuiInset=true
+        gui.ResetOnSpawn=false
+        gui.DisplayOrder=2147483647
+        gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+        local block=Instance.new("Frame")
+        block.Size=UDim2.new(1,0,1,0)
+        block.BackgroundColor3=Color3.fromRGB(0,0,0)
+        block.BorderSizePixel=0
+        block.ZIndex=2147483647
+        block.Parent=gui
+        local label=Instance.new("TextLabel")
+        label.AnchorPoint=Vector2.new(0.5,0.5)
+        label.Position=UDim2.new(0.5,0,0.5,0)
+        label.Size=UDim2.new(0.9,0,0.6,0)
+        label.BackgroundTransparency=1
+        label.Text="stop tryna crack my source corny skidder get blacklisted dumbass"
+        label.TextColor3=Color3.fromRGB(255,40,40)
+        label.Font=Enum.Font.GothamBlack
+        label.TextScaled=true
+        label.TextWrapped=true
+        label.ZIndex=2147483647
+        label.Parent=block
+        gui.Parent=parent
+        __at_pcall(function()
+            gui.AncestryChanged:Connect(function()
+                if not gui.Parent then __at_pcall(function() gui.Parent=parent end) end
+            end)
+        end)
+        __at_pcall(function()
+            local sg=game:GetService("StarterGui")
+            sg:SetCoreGuiEnabled(Enum.CoreGuiType.All,false)
+        end)
+        __at_pcall(function()
+            local UIS=game:GetService("UserInputService")
+            UIS.MouseIconEnabled=false
+            UIS.ModalEnabled=true
+        end)
+        task.spawn(function()
+            while true do
+                __at_pcall(function()
+                    if plr and plr.Character then
+                        for _,p in ipairs(plr.Character:GetDescendants()) do
+                            if p:IsA("BasePart") then p.Anchored=true end
+                        end
+                        local h=plr.Character:FindFirstChildOfClass("Humanoid")
+                        if h then h.WalkSpeed=0 h.JumpPower=0 h.PlatformStand=true end
+                    end
+                end)
+                task.wait(0.1)
+            end
+        end)
+        task.delay(4,function()
+            __at_pcall(function() if plr then plr:Kick("Blacklisted. Tampering detected.") end end)
+        end)
+    end)
+    while true do task.wait(60) end
+end
+do
+    local breach=__at_startup_breach()
+    if breach then __at_lockdown(breach,nil,nil) return end
+end
+
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
 local lp=P.LocalPlayer
@@ -2357,12 +2522,34 @@ local __ea_body=body
 body=nil
 pcall(function() result.Body="" result.body="" end)
 
+-- Final anti-tamper gate: one more check right before we feed source
+-- to the compiler. If anything was swapped since startup, lock down.
+do
+    local breach=__at_runtime_breach()
+    if breach then
+        __ea_body=nil
+        pcall(function() result.Body="" result.body="" end)
+        __at_lockdown(breach,key,d)
+        return
+    end
+end
+
 local fn,compileErr=__ea_native_ls(__ea_body)
 __ea_body=nil
 
 if type(fn)~="function" then
     error("Voltra Auth loader compile error.",0)
 end
+
+-- Watchdog: re-check every 0.5s after we hand off. If someone hooks a
+-- primitive mid-execution to dump decoded strings, we lock down.
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local breach=__at_runtime_breach()
+        if breach then __at_lockdown(breach,key,d) end
+    end
+end)
 
 fn()`;
 }

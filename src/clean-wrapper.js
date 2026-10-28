@@ -87,7 +87,7 @@ async function verifyDiscordInteraction(request, rawBody, env) {
 function discordHeaders(env, extra = {}) {
   return {
     authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-    "user-agent": "EternalAuth-Clean/1.0",
+    "user-agent": "VoltraAuth-Clean/1.0",
     ...extra,
   };
 }
@@ -204,7 +204,7 @@ async function listGuildMembers(env, guildId) {
     if (!response.ok || !Array.isArray(data)) {
       const detail = data?.message ? `: ${data.message}` : "";
       if (response.status === 403) {
-        throw new Error(`Discord denied the member list${detail}. Enable Server Members Intent for Eternal Auth.`);
+        throw new Error(`Discord denied the member list${detail}. Enable Server Members Intent for Voltra Auth.`);
       }
       throw new Error(`Could not read server members (HTTP ${response.status})${detail}.`);
     }
@@ -248,10 +248,10 @@ async function cleanGuild(env, guildId, actorId, source = "/clean") {
   const guild = guildResult.data;
   const bot = botResult.data;
   if (!guildResult.response.ok || !guild?.id) {
-    throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Eternal Auth is in that server.`);
+    throw new Error(guild?.message || `Could not load the server (HTTP ${guildResult.response.status}). Make sure Voltra Auth is in that server.`);
   }
   if (!botResult.response.ok || !bot?.id) {
-    throw new Error(bot?.message || `Could not identify Eternal Auth (HTTP ${botResult.response.status}).`);
+    throw new Error(bot?.message || `Could not identify Voltra Auth (HTTP ${botResult.response.status}).`);
   }
 
   const botMemberResult = await discordJson(
@@ -262,7 +262,7 @@ async function cleanGuild(env, guildId, actorId, source = "/clean") {
   if (!botMemberResult.response.ok || !botMemberResult.data?.user?.id) {
     throw new Error(
       botMemberResult.data?.message
-        || `Could not read Eternal Auth's member record (HTTP ${botMemberResult.response.status}).`,
+        || `Could not read Voltra Auth's member record (HTTP ${botMemberResult.response.status}).`,
     );
   }
 
@@ -274,7 +274,7 @@ async function cleanGuild(env, guildId, actorId, source = "/clean") {
     const missing = [!canBan ? "Ban Members" : null, !canManage ? "Manage Server" : null]
       .filter(Boolean)
       .join(" + ");
-    throw new Error(`Eternal Auth is missing ${missing} in ${guild.name || guildId}.`);
+    throw new Error(`Voltra Auth is missing ${missing} in ${guild.name || guildId}.`);
   }
 
   const members = await listGuildMembers(env, guildId);
@@ -299,7 +299,7 @@ async function cleanGuild(env, guildId, actorId, source = "/clean") {
     batches += 1;
 
     const reason = encodeURIComponent(
-      `Eternal Auth ${source} by ${actorId || "dashboard"}`.slice(0, 480),
+      `Voltra Auth ${source} by ${actorId || "dashboard"}`.slice(0, 480),
     );
 
     const { response, data } = await discordJson(
@@ -315,7 +315,7 @@ async function cleanGuild(env, guildId, actorId, source = "/clean") {
     if (!response.ok) {
       const detail = data?.message ? `: ${data.message}` : "";
       if (response.status === 403) {
-        throw new Error(`Discord rejected batch ${batches}${detail}. Check Ban Members + Manage Server and Eternal Auth's role position.`);
+        throw new Error(`Discord rejected batch ${batches}${detail}. Check Ban Members + Manage Server and Voltra Auth's role position.`);
       }
       failed += batch.length;
       failedUsers.push(...batch);
@@ -386,7 +386,7 @@ async function maybeHandleClean(request, env, ctx) {
     return json({
       type: 4,
       data: {
-        content: "You can see `/clean`, but only an authorized Eternal Auth manager, server administrator, or configured owner account can run it.",
+        content: "You can see `/clean`, but only an authorized Voltra Auth manager, server administrator, or configured owner account can run it.",
         flags: EPHEMERAL,
         allowed_mentions: { parse: [] },
       },
@@ -416,7 +416,7 @@ async function maybeHandleDashboardClean(request, env, ctx) {
   if (url.pathname !== "/api/admin/server-cleanup" || request.method !== "POST") return null;
 
   if (!await dashboardAuthorized(request, env, ctx)) {
-    return json({ ok: false, error: "Sign in to Eternal Auth first." }, 401);
+    return json({ ok: false, error: "Sign in to Voltra Auth first." }, 401);
   }
 
   let body = {};

@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { hwidCooldownSeconds } from '../src/device-security.js';
 let source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 source = source.replace('import { DurableObject } from "cloudflare:workers";', 'class DurableObject {}');
-for (const file of ['dm-responder.js', 'device-security.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
+for (const file of ['dm-responder.js', 'device-security.js', 'lua-obfuscator.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
 source = source.replace('"../public/entry-loader.js"', JSON.stringify(new URL('../public/entry-loader.js', import.meta.url).href));
 source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource, ensureBackendPersistenceSchema };';
 const api = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
@@ -136,13 +136,17 @@ test('client security reports are informational and never create HWID bans', asy
   const { db, env } = await fixture();
   let response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status, 200);
-  assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
+  assert.match(await response.text(), /SECRET_PROTECTED_CONTENT/);
 
   response = await api.handleSecurityReport(report({key:'valid-key',device_id:'someone-else',reason:'gui'}), env);
   assert.equal(response.status, 403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n, 0);
 
-  for (const reason of ['gui','clipboard','file','console','network','integrity','environment','hwid_spoof']) {
+  // Persistent reasons now blacklist on first report. Only true heuristics
+  // (integrity, environment, hwid_spoof) stay informational.
+  for (const reason of ['integrity','environment','hwid_spoof']) {
+    db.prepare("UPDATE licenses SET status='active' WHERE id='l'").run();
+    db.prepare("DELETE FROM hwid_blacklists").run();
     response = await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}), env);
     assert.equal(response.status, 200, reason);
     const body = await response.json();
@@ -150,23 +154,28 @@ test('client security reports are informational and never create HWID bans', asy
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n, 0, reason);
     assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status, 'active', reason);
   }
-
-  response = await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
-  assert.equal(response.status, 200);
-  assert.equal(await response.text(), 'SECRET_PROTECTED_CONTENT');
 });
 
-test('heuristic security reports never create persistent HWID bans', async () => {
+test('heuristic reasons stay informational; tampering and http_spy blacklist persistently', async () => {
   const {db,env}=await fixture();
   let response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'a',scriptId:'s'});
   assert.equal(response.status,200);
-  for (const reason of ['integrity','environment','http_spy','hwid_spoof']) {
+  for (const reason of ['integrity','environment','hwid_spoof']) {
+    db.prepare("UPDATE licenses SET status='active' WHERE id='l'").run();
+    db.prepare("DELETE FROM hwid_blacklists").run();
+    response=await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}),env);
+    const body=await response.json();
+    assert.equal(body.persistent,false,reason);
+  }
+  for (const reason of ['tampering','http_spy']) {
+    db.prepare("UPDATE licenses SET status='active' WHERE id='l'").run();
+    db.prepare("DELETE FROM hwid_blacklists").run();
     response=await api.handleSecurityReport(report({key:'valid-key',device_id:'a',reason}),env);
     assert.equal(response.status,200,reason);
     const body=await response.json();
-    assert.equal(body.persistent,false,reason);
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0,reason);
-    assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'active',reason);
+    assert.equal(body.persistent,true,reason);
+    assert.equal(body.status,'Blacklisted',reason);
+    assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'security_blacklisted',reason);
   }
 });
 
@@ -220,8 +229,10 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/local __ea_stage_reverse=/);
   assert.match(lua,/string\.reverse\(__ea_stage_reverse\)/);
   assert.match(lua,/X-Eternal-Execute/);
-  assert.match(lua,/loadstring\(body\)/);
+  assert.match(lua,/pcall\(__ea_native_ls,__ea_body\)/);
   assert.match(lua,/body=nil/);
+  assert.match(lua,/loadstring_hook/);
+  assert.match(lua,/iscclosure/);
   assert.match(lua,/hookfunction/);
   assert.match(lua,/getrenv/);
   assert.match(lua,/getfenv\(0\)/);
@@ -229,7 +240,11 @@ test('reset default is five minutes and bootstrap only guards clipboard source l
   assert.match(lua,/copyclipboard/);
   assert.match(lua,/clipboardset/);
   assert.match(lua,/setrbxclipboard/);
-  assert.doesNotMatch(lua,/http_spy|__ea_has_url_scheme|TextLabel|hookmetamethod/);
+  assert.doesNotMatch(lua,/__ea_has_url_scheme|hookmetamethod/);
+  // Anti-tamper lockdown uses TextLabel; just make sure it's wired to the right reason.
+  assert.match(lua,/reason="tampering"/);
+  assert.match(lua,/reason="http_spy"/);
+  assert.match(lua,/stop tryna crack my source/);
   assert.doesNotMatch(lua,/\$\{/);
 });
 
@@ -237,7 +252,7 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   const {db,env}=await fixture();
   let response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua'),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,200);
-  assert.match(await response.text(),/Eternal Auth FFA loader/);
+  assert.match(await response.text(),/Voltra Auth FFA loader/);
   response=await api.handleFfaPublicLoader(new Request('https://auth.test/files/v4/ffa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lua',{headers:{'x-eternal-device':'ffa-device','x-eternal-execute':'1'}}),env,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(response.status,200);
   const bootstrap=await response.text();
@@ -245,10 +260,11 @@ test('FFA is keyless, requires a device, respects the switch and returns protect
   assert.match(bootstrap,/api\/v1\/ffa\/security\/report/);
   assert.match(bootstrap,/reason="clipboard_source"/);
   assert.match(bootstrap,/setclipboard/);
-  assert.doesNotMatch(bootstrap,/http_spy|__ea_has_url_scheme/);
+  assert.doesNotMatch(bootstrap,/__ea_has_url_scheme/);
   assert.match(bootstrap,/X-Eternal-Ticket/);
   assert.match(bootstrap,/X-Eternal-Execute/);
-  assert.match(bootstrap,/loadstring\(body\)/);
+  assert.match(bootstrap,/pcall\(__ea_native_ls,__ea_body\)/);
+  assert.match(bootstrap,/loadstring_hook/);
   assert.doesNotMatch(bootstrap,/__ea_block|hookmetamethod/);
   assert.doesNotMatch(bootstrap,/You need a script_key/);
   response=await secureFfaResponse(env,{deviceId:'ffa-device',scriptId:'s'});
@@ -340,7 +356,7 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(response.status,200);
   const source=await response.text();
   assert.match(source,/X-Eternal-Execute/);
-  assert.match(source,/Eternal Auth loader compile error/);
+  assert.match(source,/Voltra Auth loader compile error/);
   assert.match(source,/reason="clipboard_source"/);
   assert.match(source,/hookfunction/);
   assert.match(source,/getrenv/);
@@ -362,7 +378,7 @@ test('old automatic HWID bans self-recover on a valid request', async () => {
     db.prepare("INSERT INTO hwid_blacklists (guild_id,hwid_hash,reason,license_id,created_at) VALUES ('123456789012345678',?,?, 'l',0)").run(hash,reason);
     const response=await secureProtectedResponse(env,{key:'valid-key',deviceId:'legacy-device',scriptId:'s'});
     assert.equal(response.status,200,reason);
-    assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT',reason);
+    assert.match(await response.text(),/SECRET_PROTECTED_CONTENT/,reason);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0,reason);
     assert.equal(db.prepare("SELECT status FROM licenses WHERE id='l'").get().status,'active',reason);
   }
@@ -415,12 +431,10 @@ test('Get Script output is two lines and each script receives its own loader URL
   const second=api.buildLoader('', 'EA-SECOND', guild, {loader_id:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'});
   assert.equal(first.split('\n').length,2);
   assert.match(first,/^script_key="EA-FIRST"\n/);
-  assert.match(first,/game:HttpGet\("https:\/\/auth\.test\/files\/v4\/loaders\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\.lua"\)/);
-  assert.match(first,/type\(loadstring\)~="function"/);
-  assert.match(first,/Eternal Auth loader compile error/);
+  assert.match(first,/^script_key="EA-FIRST"\nloadstring\(game:HttpGet\("https:\/\/auth\.test\/files\/v4\/loaders\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\.lua"\)\)\(\)$/);
   assert.match(second,/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\.lua/);
   assert.notEqual(first,second);
-  assert.doesNotMatch(first,/X-Eternal-Execute|local e=/);
+  assert.doesNotMatch(first,/X-Eternal-Execute|local e=|__ea_src/);
 });
 
 test('FFA non-spy signed reports remain informational', async () => {
@@ -432,7 +446,9 @@ test('FFA non-spy signed reports remain informational', async () => {
   assert.equal(response.status,403);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM hwid_blacklists').get().n,0);
 
-  response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'ffa-device',reason:'gui',token})}),env);
+  // integrity is a heuristic reason that stays informational; persistent
+  // reasons like "gui" / "tampering" / "http_spy" now blacklist on FFA too.
+  response=await api.handleFfaSecurityReport(new Request('https://auth.test/api/v1/ffa/security/report',{method:'POST',body:JSON.stringify({device_id:'ffa-device',reason:'integrity',token})}),env);
   assert.equal(response.status,200);
   const body=await response.json();
   assert.equal(body.persistent,false);
@@ -557,7 +573,7 @@ test('protected source requires a signed single-use ticket but tolerates IP and 
 
   response=await api.handleProtectedLoader(protectedRequest(),env);
   assert.equal(response.status,200);
-  assert.equal(await response.text(),'SECRET_PROTECTED_CONTENT');
+  assert.match(await response.text(),/SECRET_PROTECTED_CONTENT/);
 
   response=await api.handleProtectedLoader(protectedRequest(),env);
   assert.equal(response.status,403);

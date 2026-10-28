@@ -42,7 +42,7 @@ async function discordJson(env, path, options = {}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const headers = new Headers(options.headers || {});
     headers.set("authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
-    headers.set("user-agent", "EternalAuth-CleanGuild/1.0");
+    headers.set("user-agent", "VoltraAuth-CleanGuild/1.0");
     if (options.body && !headers.has("content-type")) {
       headers.set("content-type", "application/json");
     }
@@ -79,7 +79,7 @@ async function botGuildIds(env) {
     );
 
     if (!response.ok || !Array.isArray(data)) {
-      throw new Error(data?.message || `Could not enumerate Eternal Auth guilds (HTTP ${response.status}).`);
+      throw new Error(data?.message || `Could not enumerate Voltra Auth guilds (HTTP ${response.status}).`);
     }
 
     for (const guild of data) {
@@ -225,7 +225,7 @@ export default {
       const authResponse = await verifyDashboardSession(request, env, ctx);
       if (!authResponse.ok) {
         return json(
-          { ok: false, error: authResponse.status === 401 ? "Sign in to Eternal Auth first." : "Dashboard authorization failed." },
+          { ok: false, error: authResponse.status === 401 ? "Sign in to Voltra Auth first." : "Dashboard authorization failed." },
           authResponse.status,
         );
       }

@@ -1,5 +1,5 @@
 const OWNER_ID = "1167590082878902435";
-// Direct-message command responder for Eternal Auth.
+// Direct-message command responder for Voltra Auth.
 export class DmResponder {
   constructor(env, request = fetch, clock = Date.now) {
     this.env = env;
@@ -33,14 +33,14 @@ export class DmResponder {
 
     this.pending++;
     try {
-      let content = 'Eternal Auth is online. Use your server’s Eternal Auth panel for Get Script, Redeem Key, Reset HWID, or Get Role. Send help, script, redeem, hwid, or status here for guidance.';
+      let content = 'Voltra Auth is online. Use your server’s Voltra Auth panel for Get Script, Redeem Key, Reset HWID, or Get Role. Send help, script, redeem, hwid, or status here for guidance.';
       if (/^(?:help|\/help)$/.test(text)) {
-        content = 'Eternal Auth help:\n• Get Script: use /script in your linked server.\n• Redeem: use /redeem or Redeem Key on the panel.\n• Reset HWID: use /resethwid or Reset HWID.\n• Restore role: use /getrole or Get Role.\nLicense actions run in your linked server so the correct project is selected.';
+        content = 'Voltra Auth help:\n• Get Script: use /script in your linked server.\n• Redeem: use /redeem or Redeem Key on the panel.\n• Reset HWID: use /resethwid or Reset HWID.\n• Restore role: use /getrole or Get Role.\nLicense actions run in your linked server so the correct project is selected.';
       }
-      else if (/^(?:script|key|loader|\/script)$/.test(text)) content = 'Use /script or Get Script in your linked server. Eternal Auth will check your license and send your personal loader privately.';
-      else if (/^(?:redeem|\/redeem)$/.test(text)) content = 'Use Redeem Key on your server’s Eternal Auth panel, or /redeem in that server. Enter your key in the modal or command field.';
+      else if (/^(?:script|key|loader|\/script)$/.test(text)) content = 'Use /script or Get Script in your linked server. Voltra Auth will check your license and send your personal loader privately.';
+      else if (/^(?:redeem|\/redeem)$/.test(text)) content = 'Use Redeem Key on your server’s Voltra Auth panel, or /redeem in that server. Enter your key in the modal or command field.';
       else if (/^(?:hwid|reset|resethwid|\/resethwid)$/.test(text)) content = 'Use Reset HWID on your server’s panel or /resethwid. Your project’s reset cooldown applies.';
-      else if (/^(?:status|ping)$/.test(text)) content = 'Eternal Auth’s Discord connection is online and receiving DMs. This checks the bot connection only; license and database status are checked when you use your server’s panel.';
+      else if (/^(?:status|ping)$/.test(text)) content = 'Voltra Auth’s Discord connection is online and receiving DMs. This checks the bot connection only; license and database status are checked when you use your server’s panel.';
 
       return await this.sendMessage(message.channel_id, content);
     } catch {

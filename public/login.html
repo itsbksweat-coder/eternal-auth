@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#000000" />
+  <title>Voltra Auth — Sign in</title>
+  <link rel="preload" href="/styles.css" as="style" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-backdrop"></div>
+
+  <main class="page-wrap">
+    <section class="login-screen">
+      <article class="login-panel card">
+        <div class="login-brand">
+          <div class="brand-mark large">VA</div>
+          <div>
+            <span class="eyebrow">ADMIN PANEL</span>
+            <h1>Voltra Auth</h1>
+            <p>Sign in with your admin password.</p>
+          </div>
+        </div>
+        <form id="loginForm" class="stack login-form">
+          <input id="password" type="password" autocomplete="current-password" placeholder="Admin password" required />
+          <button class="primary" type="submit">Open dashboard</button>
+        </form>
+        <div id="loginMsg" class="msg"></div>
+      </article>
+    </section>
+  </main>
+
+  <script type="module" src="/login.js"></script>
+</body>
+</html>

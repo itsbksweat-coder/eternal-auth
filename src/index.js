@@ -4280,7 +4280,18 @@ function optionMap(interaction) {
   return Object.fromEntries((interaction.data?.options || []).map((o) => [o.name, o.value]));
 }
 
+// Any Discord member in your server with this role gets full command
+// access — same as if they had Administrator or the project's manager
+// role, in every project the bot is in. Treat as a bot-wide staff role.
+const VOLTRA_STAFF_ROLE_ID = "1559257141586567271";
+
+function memberHasStaffRole(interaction) {
+  const roles = interaction.member?.roles || [];
+  return roles.includes(VOLTRA_STAFF_ROLE_ID);
+}
+
 function memberIsAdmin(interaction) {
+  if (memberHasStaffRole(interaction)) return true;
   try {
     return (BigInt(interaction.member?.permissions || "0") & ADMINISTRATOR) === ADMINISTRATOR;
   } catch {

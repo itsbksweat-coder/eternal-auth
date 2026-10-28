@@ -23,6 +23,7 @@ const PERSISTENT_SECURITY_REASONS = new Set([
   "scrape_rate_abuse",
   "tampering",
   "http_spy",
+  "exfil_attempt",
 ]);
 
 const NON_PERSISTENT_SECURITY_REASONS = new Set([
@@ -2767,6 +2768,76 @@ task.spawn(function()
         end
     end
 end)
+
+-- Disable every executor exfiltration primitive right before the compiled
+-- source runs. Clipboard writers and filesystem writers get replaced with
+-- no-op stubs across _G, getgenv(), getrenv(), getfenv(0). hookfunction is
+-- also applied where available so cached references captured earlier by
+-- the attacker are intercepted too.
+do
+    local __ea_disable_names={
+        -- clipboard
+        "setclipboard","toclipboard","writeclipboard","set_clipboard","write_clipboard",
+        "setrbxclipboard","copyclipboard","clipboardset","setclip",
+        -- filesystem writers
+        "writefile","appendfile","writefileasync","makefolder","createfile","delfile","delfolder",
+    }
+    local __ea_disable_child_names={
+        "set","write","copy","setclipboard","toclipboard","writeclipboard",
+        "set_clipboard","write_clipboard","setclip",
+        "writefile","appendfile","makefolder","createfile","delfile","delfolder",
+    }
+    -- Trap: calling any disabled primitive instantly reports exfil_attempt
+    -- to the server (persistent HWID blacklist) and goes to lockdown. We
+    -- do NOT silently no-op — the attempt itself is the breach.
+    local function __ea_make_trap(fnName)
+        return function(...)
+            __at_pcall(function()
+                req({
+                    Url=${JSON.stringify(securityReportUrl)},
+                    Method="POST",
+                    Headers={["content-type"]="application/json"},
+                    Body=H:JSONEncode(${ffa
+                      ? `{device_id=tostring(d),reason="exfil_attempt",detail=tostring(fnName),token=__ea_report_token}`
+                      : `{key=tostring(key),device_id=tostring(d),reason="exfil_attempt",detail=tostring(fnName)}`})
+                })
+            end)
+            __at_lockdown("exfil_attempt via "..tostring(fnName),key,d)
+            return nil
+        end
+    end
+    local __ea_disable_envs={}
+    local __ea_env_seen={}
+    local function __ea_add_env(env)
+        if type(env)=="table" and not __ea_env_seen[env] then
+            __ea_env_seen[env]=true
+            __ea_disable_envs[#__ea_disable_envs+1]=env
+        end
+    end
+    __ea_add_env(_G)
+    pcall(function() if type(getgenv)=="function" then __ea_add_env(getgenv()) end end)
+    pcall(function() if type(getrenv)=="function" then __ea_add_env(getrenv()) end end)
+    pcall(function() if type(getfenv)=="function" then __ea_add_env(getfenv(0)) end end)
+    local function __ea_kill(env,name)
+        local ok,orig=pcall(function() return rawget(env,name) end)
+        if not ok or type(orig)~="function" then return end
+        local trap=__ea_make_trap(name)
+        -- hookfunction catches cached references the attacker already grabbed.
+        if type(hookfunction)=="function" then
+            pcall(hookfunction,orig,trap)
+        end
+        pcall(function() env[name]=trap end)
+    end
+    for _,env in ipairs(__ea_disable_envs) do
+        for _,n in ipairs(__ea_disable_names) do __ea_kill(env,n) end
+        for _,tableName in ipairs({"clipboard","Clipboard","syn","fluxus","krnl","file"}) do
+            local okT,sub=pcall(function() return rawget(env,tableName) end)
+            if okT and type(sub)=="table" then
+                for _,n in ipairs(__ea_disable_child_names) do __ea_kill(sub,n) end
+            end
+        end
+    end
+end
 
 -- Run the compiled payload. pcall so a runtime error in the user's own
 -- script doesn't leak a stack trace that references internal names.

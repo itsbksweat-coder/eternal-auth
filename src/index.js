@@ -5321,9 +5321,18 @@ function defaultLoaderTemplate() {
 
 // Authoritative Discord slash-command definitions used by the dashboard's
 // "Sync commands" button. Keep in sync with scripts/register-commands.mjs.
+//
+// default_member_permissions: "0" means "visible to everyone" at the
+// Discord layer. Access control is done at runtime by memberIsAdmin /
+// memberIsManager (which honor VOLTRA_OWNER_IDS and VOLTRA_STAFF_ROLE_ID),
+// not by Discord's own permission filter — otherwise our hardcoded staff
+// list would be invisible to Discord and the friend would never see the
+// commands to click them.
 function voltraAuthDiscordCommands() {
   const USER = 6, ROLE = 8, STRING = 3, INTEGER = 4, ATTACHMENT = 11;
-  return [
+  const EVERYONE = "0";
+  const withEveryone = (cmd) => ({ default_member_permissions: EVERYONE, ...cmd });
+  const commands = [
     { name: "login", description: "Link Voltra Auth to this Discord server", options: [
       { name: "key", description: "One-time Voltra Auth server key created by the owner", type: STRING, required: true },
     ]},
@@ -5372,6 +5381,7 @@ function voltraAuthDiscordCommands() {
     { name: "getrole", description: "Restore your configured buyer role" },
     { name: "stats", description: "Show Voltra Auth project statistics" },
   ];
+  return commands.map(withEveryone);
 }
 
 function buildLoader(template, key, guild, script = null) {

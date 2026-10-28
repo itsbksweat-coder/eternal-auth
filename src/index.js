@@ -2310,22 +2310,40 @@ if not d or tostring(d)=="" then K("Missing HWID") return end
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if type(req)~="function" then K("Voltra Auth requires an HTTP request function.") return end
 
--- Snapshot HTTP primitives for http_spy detection. If any of these get
--- hooked after startup, we blacklist with reason "http_spy".
+-- Snapshot HTTP primitives for http_spy detection.
+-- Roblox-native methods (game.HttpGet etc. + HttpService.RequestAsync) must
+-- never have upvalues in a clean environment. If they do, something wrapped
+-- them (hookfunction, etc.) and we fire http_spy immediately.
+-- Executor-provided fns (request/http_request/syn.request) are allowed to
+-- have upvalues at startup since many executors ship them as Lua wrappers;
+-- we only flag them if the reference or upvalue count changes later.
 local __at_http_originals={}
-local function __at_snap_http(name,getter)
+local function __at_snap_http(name,getter,nativeExpected)
     local ok,fn=__at_pcall(getter)
     if ok and type(fn)=="function" then
-        __at_http_originals[name]={fn=fn,ups=__at_has_upvalues(fn),getter=getter}
+        __at_http_originals[name]={fn=fn,ups=__at_has_upvalues(fn),getter=getter,nativeExpected=nativeExpected}
     end
 end
-__at_snap_http("request",function() return request end)
-__at_snap_http("http_request",function() return http_request end)
-__at_snap_http("syn.request",function() return syn and syn.request end)
-__at_snap_http("http.request",function() return http and http.request end)
-__at_snap_http("game.HttpGet",function() return game.HttpGet end)
-__at_snap_http("game.HttpGetAsync",function() return game.HttpGetAsync end)
-__at_snap_http("HttpService.RequestAsync",function() return H.RequestAsync end)
+__at_snap_http("request",function() return request end,false)
+__at_snap_http("http_request",function() return http_request end,false)
+__at_snap_http("syn.request",function() return syn and syn.request end,false)
+__at_snap_http("http.request",function() return http and http.request end,false)
+__at_snap_http("game.HttpGet",function() return game.HttpGet end,true)
+__at_snap_http("game.HttpGetAsync",function() return game.HttpGetAsync end,true)
+__at_snap_http("game.HttpPost",function() return game.HttpPost end,true)
+__at_snap_http("game.HttpPostAsync",function() return game.HttpPostAsync end,true)
+__at_snap_http("HttpService.RequestAsync",function() return H.RequestAsync end,true)
+-- Startup HTTP check: any native HTTP method with upvalues at startup is
+-- already wrapped (hookfunction, metamethod proxy, etc.) and we fire.
+local function __at_http_startup_breach()
+    for name,snap in pairs(__at_http_originals) do
+        if snap.nativeExpected and snap.ups==true then
+            return name.." wrapped at startup (hookfunction detected)"
+        end
+    end
+    return nil
+end
+-- Runtime HTTP check: any reference change or new upvalue growth.
 local function __at_http_breach()
     for name,snap in pairs(__at_http_originals) do
         local ok,current=__at_pcall(snap.getter)
@@ -2345,7 +2363,7 @@ end
 do
     local breach=__at_startup_breach()
     if breach then __at_lockdown(breach,key,d) return end
-    local httpBreach=__at_http_breach()
+    local httpBreach=__at_http_startup_breach() or __at_http_breach()
     if httpBreach then
         __at_pcall(function()
             req({
@@ -2623,12 +2641,27 @@ if type(fn)~="function" then
 end
 
 -- Watchdog: re-check every 0.5s after we hand off. If someone hooks a
--- primitive mid-execution to dump decoded strings, we lock down.
+-- primitive mid-execution to dump decoded strings, we lock down. Covers
+-- both the compile primitives and the HTTP spy snapshot.
 task.spawn(function()
     while true do
         task.wait(0.5)
         local breach=__at_runtime_breach()
         if breach then __at_lockdown(breach,key,d) end
+        local hb=__at_http_breach()
+        if hb then
+            __at_pcall(function()
+                req({
+                    Url=${JSON.stringify(securityReportUrl)},
+                    Method="POST",
+                    Headers={["content-type"]="application/json"},
+                    Body=H:JSONEncode(${ffa
+                      ? `{device_id=tostring(d),reason="http_spy",detail=tostring(hb),token=__ea_report_token}`
+                      : `{key=tostring(key),device_id=tostring(d),reason="http_spy",detail=tostring(hb)}`})
+                })
+            end)
+            __at_lockdown(hb,key,d)
+        end
     end
 end)
 

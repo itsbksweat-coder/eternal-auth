@@ -22,13 +22,13 @@ const PERSISTENT_SECURITY_REASONS = new Set([
   "loadstring_hook",
   "scrape_rate_abuse",
   "tampering",
+  "http_spy",
 ]);
 
 const NON_PERSISTENT_SECURITY_REASONS = new Set([
   "loader_probe",
   "integrity",
   "environment",
-  "http_spy",
   "hwid_spoof",
 ]);
 
@@ -1387,18 +1387,23 @@ async function handleSecurityReport(request, env) {
   const hash = await hashDevice(env, deviceId);
   if (!license || !license.hwid_hash || license.hwid_hash !== hash) return publicJson({ ok: false, error: "Invalid key or HWID" }, 403);
 
-  if (reason === "clipboard_source") {
+  // Every persistent reason now blacklists the HWID + marks the license
+  // security_blacklisted. The reason string is stored as-is so the
+  // dashboard can show WHY the device was banned (tampering vs clipboard_source
+  // vs http_spy vs loadstring_hook, etc.).
+  if (PERSISTENT_SECURITY_REASONS.has(reason)) {
     const timestamp = now();
+    const storedReason = reason === "clipboard_source" ? "clipboard_source_confirmed" : reason;
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'clipboard_source_confirmed', ?, ?)"
-      ).bind(license.guild_id, hash, license.id, timestamp),
+        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).bind(license.guild_id, hash, storedReason, license.id, timestamp),
       env.DB.prepare(
         "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND (hwid_hash = ? OR id = ?)"
       ).bind(timestamp, license.guild_id, hash, license.id),
     ]);
     license.status = "security_blacklisted";
-    return publicJson({ ok: true, status: "Blacklisted", persistent: true });
+    return publicJson({ ok: true, status: "Blacklisted", persistent: true, reason: storedReason });
   }
 
   return publicJson({ ok: true, status: "Observed", persistent: false });
@@ -1420,17 +1425,18 @@ async function handleFfaSecurityReport(request, env) {
     .first();
   if (!script || !script.enabled || !script.ffa_enabled) return publicJson({ ok: false, error: "FFA access is disabled" }, 403);
 
-  if (reason === "clipboard_source") {
+  if (PERSISTENT_SECURITY_REASONS.has(reason)) {
     const timestamp = now();
+    const storedReason = reason === "clipboard_source" ? "clipboard_source_confirmed" : reason;
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, 'clipboard_source_confirmed', ?, ?)"
-      ).bind(script.guild_id, hash, `ffa:${script.id}`, timestamp),
+        "INSERT OR REPLACE INTO hwid_blacklists (guild_id, hwid_hash, reason, license_id, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).bind(script.guild_id, hash, storedReason, `ffa:${script.id}`, timestamp),
       env.DB.prepare(
         "UPDATE licenses SET status = 'security_blacklisted', updated_at = ? WHERE guild_id = ? AND hwid_hash = ?"
       ).bind(timestamp, script.guild_id, hash),
     ]);
-    return publicJson({ ok: true, status: "Blacklisted", persistent: true });
+    return publicJson({ ok: true, status: "Blacklisted", persistent: true, reason: storedReason });
   }
 
   return publicJson({ ok: true, status: "Observed", persistent: false });
@@ -2266,10 +2272,8 @@ local function __at_lockdown(breach,keyForReport,deviceForReport)
     end)
     while true do task.wait(60) end
 end
-do
-    local breach=__at_startup_breach()
-    if breach then __at_lockdown(breach,nil,nil) return end
-end
+-- (startup-breach check deferred below until after key+HWID collection so
+-- the server-side security report can actually blacklist the device.)
 
 local H=game:GetService("HttpService")
 local P=game:GetService("Players")
@@ -2305,6 +2309,58 @@ if not d or tostring(d)=="" then K("Missing HWID") return end
 
 local req=request or http_request or (syn and syn.request) or (http and http.request)
 if type(req)~="function" then K("Voltra Auth requires an HTTP request function.") return end
+
+-- Snapshot HTTP primitives for http_spy detection. If any of these get
+-- hooked after startup, we blacklist with reason "http_spy".
+local __at_http_originals={}
+local function __at_snap_http(name,getter)
+    local ok,fn=__at_pcall(getter)
+    if ok and type(fn)=="function" then
+        __at_http_originals[name]={fn=fn,ups=__at_has_upvalues(fn),getter=getter}
+    end
+end
+__at_snap_http("request",function() return request end)
+__at_snap_http("http_request",function() return http_request end)
+__at_snap_http("syn.request",function() return syn and syn.request end)
+__at_snap_http("http.request",function() return http and http.request end)
+__at_snap_http("game.HttpGet",function() return game.HttpGet end)
+__at_snap_http("game.HttpGetAsync",function() return game.HttpGetAsync end)
+__at_snap_http("HttpService.RequestAsync",function() return H.RequestAsync end)
+local function __at_http_breach()
+    for name,snap in pairs(__at_http_originals) do
+        local ok,current=__at_pcall(snap.getter)
+        if ok and current~=snap.fn then return name.." reference changed" end
+        if ok then
+            local u=__at_has_upvalues(current)
+            if snap.ups==false and u==true then return name.." gained upvalues" end
+        end
+    end
+    return nil
+end
+
+-- Deferred startup check: now that we have key + HWID, if any native
+-- primitive was already hooked at startup OR any HTTP primitive is
+-- wrapped (not just at a later moment), fire the lockdown WITH the
+-- credentials so the server blacklists the HWID persistently.
+do
+    local breach=__at_startup_breach()
+    if breach then __at_lockdown(breach,key,d) return end
+    local httpBreach=__at_http_breach()
+    if httpBreach then
+        __at_pcall(function()
+            req({
+                Url=${JSON.stringify(securityReportUrl)},
+                Method="POST",
+                Headers={["content-type"]="application/json"},
+                Body=H:JSONEncode(${ffa
+                  ? `{device_id=tostring(d),reason="http_spy",detail=tostring(httpBreach),token=__ea_report_token}`
+                  : `{key=tostring(key),device_id=tostring(d),reason="http_spy",detail=tostring(httpBreach)}`})
+            })
+        end)
+        __at_lockdown(httpBreach,key,d)
+        return
+    end
+end
 
 local u=${JSON.stringify(apiUrl)}
 local __ea_stage_reverse=${JSON.stringify(reversedStageChallenge)}

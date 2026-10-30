@@ -1,4 +1,5 @@
 import { authenticatedLauncher, ffaLauncher } from "../public/entry-loader.js";
+import { validateProtectedLua } from "./luau-validate.js";
 import { DurableObject } from "cloudflare:workers";
 import { DmResponder } from "./dm-responder.js";
 import { deviceBlocked, bindDevice, hwidCooldownSeconds } from "./device-security.js";
@@ -562,6 +563,10 @@ export default {
 
       if (url.pathname === "/api/v1/ffa/security/report" && request.method === "POST") {
         return handleFfaSecurityReport(request, env);
+      }
+
+      if (url.pathname === "/api/v1/loader/report" && request.method === "POST") {
+        return handleLoaderCompileReport(request, env);
       }
 
       if (url.pathname === "/api/v1/verify" && request.method === "POST") {
@@ -1186,6 +1191,33 @@ async function validateLicense(env, license, deviceId = null, shouldBindDevice =
   }
 
   return { ok: true };
+}
+
+// Receives a loader compile-error report from the client loader so the script
+// owner is told their protected source failed to compile, instead of players
+// silently getting kicked with a raw Luau parser error.
+async function handleLoaderCompileReport(request, env) {
+  const body = await readJson(request);
+  const key = cleanText(body?.key, 256);
+  const deviceId = cleanText(body?.device_id, 512);
+  const compileError = cleanText(body?.error, 500) || "(no detail provided)";
+  if (!key || !deviceId) return publicJson({ ok: true });
+  const license = await findLicenseByKey(env, key);
+  if (!license) return publicJson({ ok: true });
+  const hash = await hashDevice(env, deviceId);
+  if (!license.hwid_hash || license.hwid_hash !== hash) return publicJson({ ok: true });
+  const guild = await getGuild(env, license.guild_id);
+  const shortDevice = hash ? String(hash).slice(0, 10) : "unknown";
+  await audit(env, license.guild_id, "loader.compile_error", "loader", license.id, { error: compileError });
+  if (guild) {
+    await sendLog(env, guild, [
+      "\u26a0\ufe0f **Loader compile error** \u2014 a buyer could not run your script.",
+      "The protected source failed to compile on the client:",
+      "```" + compileError + "```",
+      "Re-upload a working build of this script. (device `" + shortDevice + "`)",
+    ].join("\n"));
+  }
+  return publicJson({ ok: true });
 }
 
 async function handleSecurityReport(request, env) {
@@ -1817,6 +1849,7 @@ async function migrateLegacyDeviceBinding(env, license, deviceId, legacyDeviceId
 function buildBootstrapSource(origin, scriptId, ffa = false, ffaReportToken = "", loaderTicket = "", stageChallenge = "") {
   const apiUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa-loader" : "loader"}?script_id=${encodeURIComponent(scriptId)}`;
   const securityReportUrl = `${String(origin).replace(/\/$/, "")}/api/v1/${ffa ? "ffa/security/report" : "security/report"}`;
+  const loaderReportUrl = `${String(origin).replace(/\/$/, "")}/api/v1/loader/report`;
   const keySetup = ffa
     ? `local key="FFA"`
     : `local key=e.script_key or script_key
@@ -2044,7 +2077,16 @@ end)
 body=nil
 
 if type(fn)~="function" then
-    error("Eternal Auth loader compile error: "..tostring(compileErr),0)
+    pcall(function()
+        req({
+            Url=${JSON.stringify(loaderReportUrl)},
+            Method="POST",
+            Headers={["content-type"]="application/json"},
+            Body=H:JSONEncode({key=tostring(key),device_id=tostring(d),reason="loader_compile_error",error=string.sub(tostring(compileErr),1,500)})
+        })
+    end)
+    K("This script is temporarily unavailable. The developer has been notified.")
+    return
 end
 
 fn()`;
@@ -3006,6 +3048,8 @@ async function handleAdminApi(request, env, url, ctx) {
     const version = cleanText(body?.version, 40) || "1.0.0";
     const enabled = body?.enabled === false ? 0 : 1;
     const ffaEnabled = body?.ffa_enabled === true ? 1 : 0;
+    const validation = validateProtectedLua(rawContent);
+    if (!validation.ok) return json({ ok: false, error: `Protected source could not compile: ${validation.error}. Re-upload a working build.` }, 400);
     const content = rawContent;
     const timestamp = now();
 
@@ -3039,6 +3083,8 @@ async function handleAdminApi(request, env, url, ctx) {
       if (!sourceFileName) return json({ ok: false, error: "Replacing protected source requires an uploaded text/script file." }, 400);
       if (!rawContent.trim()) return json({ ok: false, error: "Uploaded script file is empty." }, 400);
       if (rawContent.length > 2_000_000) return json({ ok: false, error: "Uploaded script file is too large." }, 413);
+      const validation = validateProtectedLua(rawContent);
+      if (!validation.ok) return json({ ok: false, error: `Protected source could not compile: ${validation.error}. Re-upload a working build.` }, 400);
       content = rawContent;
     }
     await env.DB.prepare("UPDATE scripts SET name = ?, version = ?, enabled = ?, ffa_enabled = ?, content = ?, updated_at = ? WHERE id = ?")

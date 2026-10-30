@@ -5,9 +5,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { hwidCooldownSeconds } from '../src/device-security.js';
 let source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 source = source.replace('import { DurableObject } from "cloudflare:workers";', 'class DurableObject {}');
-for (const file of ['dm-responder.js', 'device-security.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
+for (const file of ['dm-responder.js', 'device-security.js', 'luau-validate.js']) source = source.replace(`"./${file}"`, JSON.stringify(new URL(`../src/${file}`, import.meta.url).href));
 source = source.replace('"../public/entry-loader.js"', JSON.stringify(new URL('../public/entry-loader.js', import.meta.url).href));
-source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource, ensureBackendPersistenceSchema };';
+source += '\nexport { handleAdminApi, handlePublicLoader, handleFfaPublicLoader, handleFfaProtectedLoader, handleFfaSecurityReport, createFfaReportToken, buildLoader, handleProtectedLoader, handleVerify, handleSecurityReport, handleLoaderCompileReport, resetOwnHwid, sha256Hex, hashDevice, buildBootstrapSource, ensureBackendPersistenceSchema };';
 const api = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 async function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -340,7 +340,9 @@ test('legacy first-stage requests receive only a compatibility launcher, never p
   assert.equal(response.status,200);
   const source=await response.text();
   assert.match(source,/X-Eternal-Execute/);
-  assert.match(source,/Eternal Auth loader compile error/);
+  assert.match(source,/reason="loader_compile_error"/);
+  assert.match(source,/api\/v1\/loader\/report/);
+  assert.match(source,/The developer has been notified/);
   assert.match(source,/reason="clipboard_source"/);
   assert.match(source,/hookfunction/);
   assert.match(source,/getrenv/);
@@ -569,4 +571,31 @@ test('user reset reports remaining seconds within five-minute cooldown', async (
   db.prepare("UPDATE licenses SET last_hwid_reset=? WHERE id='l'").run(Math.floor(Date.now()/1000)-60);
   const response=await api.resetOwnHwid(env,{guild_id:'123456789012345678'},'u',{waitUntil(){}});
   assert.match(await response.text(), /second\(s\)/);
+});
+
+test('rejects uploading protected source that cannot compile', async () => {
+  const {env}=await fixture();
+  const bad=new Request('https://auth.test/api/admin/scripts',{method:'POST',body:JSON.stringify({guild_id:'123456789012345678',source_file_name:'x.lua',content:'local s="oops\nprint(s)'})});
+  const badResp=await api.handleAdminApi(bad,env,new URL(bad.url),{waitUntil(){}});
+  assert.equal(badResp.status,400);
+  assert.match((await badResp.json()).error,/could not compile/);
+
+  const good=new Request('https://auth.test/api/admin/scripts',{method:'POST',body:JSON.stringify({guild_id:'123456789012345678',source_file_name:'ok.lua',content:'local a=1 print(a)'})});
+  const goodResp=await api.handleAdminApi(good,env,new URL(good.url),{waitUntil(){}});
+  assert.equal(goodResp.status,201);
+});
+
+test('loader compile-error report is recorded for the script owner', async () => {
+  const {db,env}=await fixture();
+  const hash=await api.hashDevice(env,'buyer-device');
+  db.prepare("UPDATE licenses SET hwid_hash=? WHERE id='l'").run(hash);
+  const req=new Request('https://auth.test/api/v1/loader/report',{method:'POST',body:JSON.stringify({key:'valid-key',device_id:'buyer-device',reason:'loader_compile_error',error:"chunk:1: Expected '(' got '__v'"})});
+  const response=await api.handleLoaderCompileReport(req,env);
+  assert.equal(response.status,200);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action='loader.compile_error'").get().n,1);
+
+  // A report with a non-matching device must not be recorded.
+  const spoof=new Request('https://auth.test/api/v1/loader/report',{method:'POST',body:JSON.stringify({key:'valid-key',device_id:'other-device',reason:'loader_compile_error',error:'x'})});
+  await api.handleLoaderCompileReport(spoof,env);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action='loader.compile_error'").get().n,1);
 });

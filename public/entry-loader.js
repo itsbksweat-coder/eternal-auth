@@ -197,6 +197,7 @@ __ea_disable_clipboard()
 
 export function authenticatedLauncher(url, key = null) {
   const reportUrl = new URL("/api/v1/security/report", url).toString();
+  const loaderReportUrl = new URL("/api/v1/loader/report", url).toString();
   return `${key === null ? '-- Set script_key to your license key before running.' : 'script_key=' + JSON.stringify(key)}
 local e=(getgenv and getgenv()) or _G
 local k=script_key or e.script_key
@@ -395,7 +396,18 @@ if type(loadstring)~="function" then stop("loadstring unavailable") return end
 local fn,err=loadstring(body)
 pcall(function() r.Body="" r.body="" end)
 body=nil
-if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
+if type(fn)~="function" then
+    pcall(function()
+        req({
+            Url=${JSON.stringify(loaderReportUrl)},
+            Method="POST",
+            Headers={["content-type"]="application/json"},
+            Body=h:JSONEncode({key=tostring(k),device_id=tostring(d),reason="loader_compile_error",error=string.sub(tostring(err),1,500)})
+        })
+    end)
+    stop("This script is temporarily unavailable. The developer has been notified.")
+    return
+end
 fn()`;
 }
 
@@ -444,7 +456,10 @@ if type(loadstring)~="function" then stop("loadstring unavailable") return end
 local fn,err=loadstring(body)
 pcall(function() r.Body="" r.body="" end)
 body=nil
-if type(fn)~="function" then error("Eternal Auth loader compile error: "..tostring(err),0) end
+if type(fn)~="function" then
+    stop("This script is temporarily unavailable. Please try again later.")
+    return
+end
 fn()`;
 }
 
